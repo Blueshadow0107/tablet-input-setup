@@ -183,6 +183,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lan", action="store_true", help="listen on ALL interfaces (token still required)")
     ap.add_argument("--also-lan", action="store_true", help="also listen on the Wi-Fi/LAN address (plain HTTP), in addition to Tailscale")
+    ap.add_argument("--loopback", action="store_true", help="also listen on 127.0.0.1 (for `adb reverse` over a USB cable: nothing leaves the machine)")
     ap.add_argument("--host", help="explicit bind address(es), comma separated (overrides everything else)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--dir", type=Path, default=DEFAULT_DIR, help="where sketches are saved")
@@ -199,6 +200,8 @@ def main() -> int:
         out = {tailscale_ip()}
         if args.also_lan:
             out.add(lan_ip())
+        if args.loopback:
+            out.add("127.0.0.1")
         return {h for h in out if h}
 
     listeners = Listeners(args.port)

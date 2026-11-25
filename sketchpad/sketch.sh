@@ -3,6 +3,8 @@
 #   sketch start [--tailscale-only]   start the server (systemd user unit). Default: Tailscale + Wi-Fi/LAN address
 #   sketch stop                       stop it
 #   sketch url                        print the URL for each network the server can be reached on
+#   sketch usb [--open]               tab on a USB cable (adb): forward its localhost:5099 to the laptop, print that URL;
+#                                     --open also launches it in the tab's browser. Needs `sketch start` once (loopback listener)
 #   sketch rotate                     make a NEW token (old bookmarks stop working) and restart
 #   sketch latest                     print the newest saved sketch (png path + caption)
 #   sketch status                     is it running, and where it listens
@@ -45,9 +47,9 @@ case "$cmd" in
     mkdir -p "$(dirname "$envfile")"
     token >/dev/null   # create it on first run only
     if [[ "${1:-}" == "--tailscale-only" ]]; then
-      : >"$envfile"
+      echo "SKETCHPAD_ARGS=--loopback" >"$envfile"
     else
-      echo "SKETCHPAD_ARGS=--also-lan" >"$envfile"
+      echo "SKETCHPAD_ARGS=--loopback --also-lan" >"$envfile"
       echo "note: the LAN link is plain HTTP and the token is long-lived; on open/shared Wi-Fi use --tailscale-only." >&2
     fi
     chmod 600 "$envfile"
@@ -61,6 +63,17 @@ case "$cmd" in
     ;;
   url)
     print_urls
+    ;;
+  usb)
+    case "${1:-}" in ""|--open) ;; *) echo "sketch usb: unknown option '$1' (only --open)" >&2; exit 2 ;; esac
+    command -v adb >/dev/null || { echo "adb not found" >&2; exit 1; }
+    adb devices | awk 'NR>1 && $2=="device"{f=1} END{exit !f}' || { echo "no authorised device on adb (plug the tab straight into the laptop, USB debugging on, accept the prompt)" >&2; exit 1; }
+    systemctl --user is-active --quiet "$UNIT" || { echo "server is not running: sketch start" >&2; exit 1; }
+    grep -q -- '--loopback' "$(dirname "$TOKEN_FILE")/env" 2>/dev/null || { echo "server has no loopback listener yet: run sketch start once" >&2; exit 1; }
+    adb reverse "tcp:$PORT" "tcp:$PORT" >/dev/null
+    url="http://localhost:$PORT/?t=$(token)"
+    echo "usb: $url"
+    if [[ "${1:-}" == "--open" ]]; then adb shell am start -a android.intent.action.VIEW -d "'$url'" >/dev/null; fi
     ;;
   rotate)
     new_token
@@ -78,6 +91,6 @@ case "$cmd" in
     ss -ltn "sport = :$PORT" 2>/dev/null | tail -n +2 | awk '{print "listening on", $4}'
     ;;
   *)
-    sed -n '2,9p' "$0"; exit 2
+    sed -n '2,13p' "$0"; exit 2
     ;;
 esac
