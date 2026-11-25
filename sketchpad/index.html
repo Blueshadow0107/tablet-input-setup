@@ -48,6 +48,7 @@
   #note button { min-height: 0; height: 36px; padding: 0 14px; border-radius: 10px; flex: none; }
   #erasebadge { position: absolute; z-index: 3; top: 10px; right: 10px; padding: 6px 12px; border-radius: 999px; background: #d12e4f; color: #fff; font-weight: 700; letter-spacing: .08em; font-size: 13px; pointer-events: none; box-shadow: 0 4px 14px #0007; }
   #pageframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--paper); }
+  #zoompct { width: auto !important; padding: 0 10px !important; font: 600 14px monospace; }
   #top button.icon { width: 42px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; flex: none; }
   #top svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   #pagespop { position: fixed; z-index: 6; min-width: 220px; max-width: 320px; padding: 6px; background: var(--bar); border: 1px solid var(--edge); border-radius: 12px; box-shadow: 0 8px 24px #0008; display: flex; flex-direction: column; gap: 4px; }
@@ -96,6 +97,8 @@
     <button id="pagesbtn" class="icon" title="Pages: put something behind your ink"></button>
     <button id="rotbtn" class="icon" title="Rotate: lock the screen to portrait or landscape (tap to cycle)" hidden></button>
     <button id="modebtn" class="icon" title="Draw / Use: pen draws, or taps go to the page" hidden></button>
+    <button id="zoompct" class="icon" title="Zoom: tap to reset to 100%" hidden></button>
+    <button id="zoomlock" class="icon" title="Zoom lock: pinch zoom is on (tap to lock)"></button>
     <input id="cap" type="text" placeholder="Say what this is (optional)" autocomplete="off">
     <button id="send" class="send">Send</button>
     <span id="dbg" hidden></span>
@@ -143,6 +146,9 @@
 const COLORS = ["#16121f", "#d12e4f", "#1f6feb", "#1a9b5b", "#e0881a", "#7c3aed"];
 const TOOLS = [["pen", "Pen"], ["shapes", "Shapes"], ["fill", "Fill"], ["eraser", "Eraser"], ["select", "Select"]];
 const FILL_TOL = 150;          // bucket fill: how far (sum of R+G+B differences) a pixel may be from the one tapped and still be filled; high enough to swallow the anti-aliased halo of a line
+const ZOOM_MIN = 0.5, ZOOM_MAX = 8; // pinch / wheel zoom limits
+const GESTURE_DECIDE_PX = 14;       // two fingers must move this far before the gesture is decided: pinch (zoom) or drag together (pan)
+const GESTURE_BOTH_PX = 6, GESTURE_ONE_PX = 90; // ...and BOTH fingers must have moved a little (each finger reports separately), unless one has clearly moved far
 const PASTE_OFFSET = 24;       // each paste lands this many px down-right of the last one, so copies don't hide the original
 const PEN_LIFT_GUARD_MS = 150; // no side-button toggle this soon after the pen last touched (a lifting tip reports buttons=1 with tiny pressure)
 const TOGGLE_DELAY_MS = 90;    // the toggle waits this long and is cancelled if the pen lands: light contact looks like a button press until the pointerdown arrives
@@ -166,6 +172,8 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   copy: SVG('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>'),
   paste: SVG('<rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V4a1 1 0 011-1h4a1 1 0 011 1v1M9.5 12h5M9.5 16h3.5"/>'),
   rotate: SVG('<path d="M20 12a8 8 0 11-3-6.2"/><path d="M20 4v5h-5"/>'),
+  lock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>'),
+  unlock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.5-1.5"/>'),
   pages: SVG('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
   draw: SVG('<path d="M4 20l1-4L16.5 4.5a2 2 0 013 3L8 19z"/><path d="M14 7l3 3"/>'),
   use: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
@@ -188,6 +196,8 @@ const base = document.createElement("canvas"), bctx = base.getContext("2d"); // 
 const $ = id => document.getElementById(id);
 let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
 let activePage = "", useMode = false; // page shown behind the ink; Use = taps go to the page instead of the pen
+let view = { s: 1, x: 0, y: 0 }; // zoom + pan: screen px = world px * s + (x, y). Objects live in world px; the SENT image is always the unzoomed canvas
+let zoomLocked = false, pinch = null, pinchRaf = 0; const tpos = new Map();
 let clip = [], pasteN = 0; // clipboard: deep copies of the objects last copied/cut
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
 // S Pen side button = TAP TO TOGGLE Pen <-> Eraser. On Samsung + Chrome the only reliable signals are: a hover move with buttons=1 and ~0 pressure (button
@@ -304,7 +314,7 @@ $("pagesbtn").innerHTML = ICON.pages;
 function setMode(use) { useMode = use; cv.style.pointerEvents = use ? "none" : ""; $("modebtn").innerHTML = use ? ICON.use : ICON.draw; $("modebtn").classList.toggle("on", use); $("modebtn").title = use ? "Use: taps go to the page (tap for Draw)" : "Draw: the pen draws (tap for Use)"; }
 function showPage(name, path) { // path = the short-lived /p/<capability>/<name>/ link the server minted in /api/pages (never the long-lived token)
   activePage = name; frame.hidden = !name; frame.src = name ? path : "about:blank";
-  $("modebtn").hidden = !name; setMode(false); rebase(); present();
+  $("modebtn").hidden = !name; setMode(false); viewChanged();
 }
 $("modebtn").onclick = () => setMode(!useMode);
 $("pagesbtn").onclick = async () => {
@@ -368,6 +378,7 @@ $("selcut").onclick = cutSel; $("selcopy").onclick = copySel; $("selpaste").oncl
 function placeSelBar(bb) { // the floating Cut/Copy/Paste/Delete bar sits above the selection (below it if there is no room), hidden while dragging
   const bar = $("selbar");
   if (!bb || cur) { bar.hidden = true; return; }
+  bb = { x0: bb.x0 * view.s + view.x, y0: bb.y0 * view.s + view.y, x1: bb.x1 * view.s + view.x, y1: bb.y1 * view.s + view.y }; // world -> screen
   $("selpaste").hidden = !clip.length;
   bar.hidden = false;
   const w = bar.offsetWidth, h = bar.offsetHeight, W = wrap.clientWidth, H = wrap.clientHeight;
@@ -455,7 +466,7 @@ const selObjs = () => objects.filter(o => sel.has(o.id));
 // ---- drawing ----
 // Bucket fill: repaints whatever is already on the canvas `c`, so it must be drawn in object order. Works on device pixels, so it reads the context's own scale.
 function floodFill(c, o) {
-  const s = c.getTransform().a, W = c.canvas.width, H = c.canvas.height, sx = Math.round(o.x * s), sy = Math.round(o.y * s);
+  const m = c.getTransform(), W = c.canvas.width, H = c.canvas.height, sx = Math.round(o.x * m.a + m.e), sy = Math.round(o.y * m.d + m.f); // world -> device pixels, incl. zoom/pan
   if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
   const img = c.getImageData(0, 0, W, H), d = img.data, i0 = (sy * W + sx) * 4, r0 = d[i0], g0 = d[i0 + 1], b0 = d[i0 + 2];
   const nr = parseInt(o.color.slice(1, 3), 16), ng = parseInt(o.color.slice(3, 5), 16), nb = parseInt(o.color.slice(5, 7), 16);
@@ -501,10 +512,23 @@ function segPen(c, a, b, o) {
   c.lineWidth = o.size * (0.35 + 0.9 * (b.p || 0.5));
   c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
 }
+const setView = c => c.setTransform(dpr() * view.s, 0, 0, dpr() * view.s, dpr() * view.x, dpr() * view.y);
+function viewChanged() { // the view moved: redraw, move the page behind the ink the same way, refresh the zoom buttons
+  rebase(); present();
+  const home = view.s === 1 && !view.x && !view.y;
+  frame.style.transformOrigin = "0 0"; frame.style.transform = home ? "" : `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
+  $("zoompct").hidden = home; $("zoompct").textContent = Math.round(view.s * 100) + "%";
+}
+function zoomAt(ns, cx, cy) { // keep the world point under (cx, cy) (client px) where it is
+  ns = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, ns));
+  const r = cv.getBoundingClientRect(), wx = (cx - r.left - view.x) / view.s, wy = (cy - r.top - view.y) / view.s;
+  view.s = ns; view.x = cx - r.left - wx * ns; view.y = cy - r.top - wy * ns; viewChanged();
+}
+function resetView() { view = { s: 1, x: 0, y: 0 }; viewChanged(); }
 function rebase() {
   base.width = cv.width; base.height = cv.height;
   if (activePage) bctx.clearRect(0, 0, base.width, base.height); else { bctx.fillStyle = PAPER; bctx.fillRect(0, 0, base.width, base.height); } // see-through over a page
-  bctx.save(); bctx.scale(dpr(), dpr());
+  bctx.save(); setView(bctx);
   for (const o of objects) if (!hidden.has(o.id)) drawObj(bctx, o);
   bctx.restore();
 }
@@ -516,13 +540,13 @@ function xfFn() { // current drag transform for the selection, or null
 }
 function present() {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(base, 0, 0); // clear first: the base is see-through over a page
-  ctx.save(); ctx.scale(dpr(), dpr());
-  const f = xfFn();
+  ctx.save(); setView(ctx);
+  const f = xfFn(), k = 1 / view.s; // k: keeps outlines and handles the same size on screen at any zoom
   if (cur) {
     if (cur.mode === "pen") drawObj(ctx, { ...cur, type: "stroke", pts: cur.pts });
     else if (cur.mode === "shape") drawObj(ctx, { ...cur, type: "shape" });
-    else if (cur.mode === "erase") { const q = cur.pts[cur.pts.length - 1]; ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.arc(q.x, q.y, cur.r, 0, 2 * Math.PI); ctx.stroke(); }
-    else if (cur.mode === "lasso") { ctx.strokeStyle = ACCENT; ctx.fillStyle = "rgba(124,58,237,.08)"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.beginPath(); cur.pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.fill(); ctx.stroke(); }
+    else if (cur.mode === "erase") { const q = cur.pts[cur.pts.length - 1]; ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5 * k; ctx.setLineDash([4 * k, 3 * k]); ctx.beginPath(); ctx.arc(q.x, q.y, cur.r, 0, 2 * Math.PI); ctx.stroke(); }
+    else if (cur.mode === "lasso") { ctx.strokeStyle = ACCENT; ctx.fillStyle = "rgba(124,58,237,.08)"; ctx.lineWidth = 1.5 * k; ctx.setLineDash([6 * k, 4 * k]); ctx.beginPath(); cur.pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.fill(); ctx.stroke(); }
     else if (f) for (const o of selObjs()) drawObj(ctx, mapObj(o, f));
   }
   let selBB = null;
@@ -530,8 +554,8 @@ function present() {
     const bb = bboxOf(selObjs(), f);
     selBB = bb;
     if (bb) {
-      ctx.setLineDash([6, 4]); ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5; ctx.strokeRect(bb.x0, bb.y0, bb.x1 - bb.x0, bb.y1 - bb.y0); ctx.setLineDash([]);
-      for (const [hx, hy] of corners(bb)) { ctx.beginPath(); ctx.arc(hx, hy, 8, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill(); ctx.stroke(); }
+      ctx.setLineDash([6 * k, 4 * k]); ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5 * k; ctx.strokeRect(bb.x0, bb.y0, bb.x1 - bb.x0, bb.y1 - bb.y0); ctx.setLineDash([]);
+      for (const [hx, hy] of corners(bb)) { ctx.beginPath(); ctx.arc(hx, hy, 8 * k, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill(); ctx.stroke(); }
     }
   }
   ctx.restore();
@@ -568,7 +592,7 @@ function togglePenTool() { // the S Pen button tap
   if (tool === "eraser") setTool(prevTool); else { prevTool = tool; setTool("eraser"); }
   toast(tool === "eraser" ? "Eraser (tap the pen button for " + (prevTool === "select" ? "Select" : prevTool) + ")" : "Back to " + tool);
 }
-const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
+const pt = e => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left - view.x) / view.s, y: (e.clientY - r.top - view.y) / view.s, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
 
 // ---- native S Pen button (wrapper app only). The app calls window.__penBtn(down) when the side button changes, and window.__penXY(px, py, phase)
 // (0 down, 1 move, 2 up) for a stroke that STARTED with the button held (Chromium hides those touches from the page). Hover-based tap detection is then switched off.
@@ -598,21 +622,22 @@ function startStroke(e) {
   if (t === "pen") { cur = { ...b, mode: "pen", pts: [p] }; armHold(); }
   else if (t === "shapes") cur = { ...b, mode: "shape", kind: shapeKind, a: p, b: p };
   else if (t === "fill") {
-    const q = bctx.getImageData(Math.round(p.x * dpr()), Math.round(p.y * dpr()), 1, 1).data, hex = "#" + [q[0], q[1], q[2]].map(v => v.toString(16).padStart(2, "0")).join("");
+    const q = bctx.getImageData(Math.round((p.x * view.s + view.x) * dpr()), Math.round((p.y * view.s + view.y) * dpr()), 1, 1).data, hex = "#" + [q[0], q[1], q[2]].map(v => v.toString(16).padStart(2, "0")).join("");
     if (hex === color.toLowerCase()) return; // already that colour: nothing to do, and no empty undo step
     commit([...objects, { id: nextId++, type: "fill", color, size: 0, x: p.x, y: p.y }]); return; }
-  else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(14, size * 3) }; eraseAt(p); }
+  else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(14, size * 3) / view.s }; eraseAt(p); }
   else selectDown(p, b);
   present();
 }
 function selectDown(p, b) {
   const bb = sel.size ? bboxOf(selObjs()) : null;
   if (bb) {
-    for (const [i, [hx, hy]] of corners(bb).entries()) if (Math.hypot(p.x - hx, p.y - hy) <= HANDLE_R) {
+    for (const [i, [hx, hy]] of corners(bb).entries()) if (Math.hypot(p.x - hx, p.y - hy) <= HANDLE_R / view.s) {
       const [ox, oy] = corners(bb)[(i + 2) % 4];
       cur = { ...b, mode: "scale", ox, oy, hx, hy, s: 1 }; hidden = new Set(sel); rebase(); return;
     }
-    if (p.x >= bb.x0 - 8 && p.x <= bb.x1 + 8 && p.y >= bb.y0 - 8 && p.y <= bb.y1 + 8) {
+    const m8 = 8 / view.s;
+    if (p.x >= bb.x0 - m8 && p.x <= bb.x1 + m8 && p.y >= bb.y0 - m8 && p.y <= bb.y1 + m8) {
       cur = { ...b, mode: "move", sx: p.x, sy: p.y, dx: 0, dy: 0 }; hidden = new Set(sel); rebase(); return;
     }
   }
@@ -648,7 +673,7 @@ function trackPenButton(e) {
   clearTimeout(toggleT); toggleT = setTimeout(() => { toggleT = 0; togglePenTool(); }, TOGGLE_DELAY_MS);
 }
 function onMove(e) {
-  if (e.pointerType === "touch") gMove(e);
+  if (e.pointerType === "touch") { gMove(e); pinchTrack(e, false); }
   if (e.pointerType === "pen") trackPenButton(e);
   dbg(e, "move");
   if (!cur || e.pointerId !== cur.pid) return;
@@ -660,7 +685,7 @@ function step(p) {
     case "pen":
       if (cur.snapped) { cur.pts[1] = { ...p, p: 0.5 }; present(); break; }
       { const prev = cur.pts[cur.pts.length - 1]; cur.pts.push(p);
-        ctx.save(); ctx.scale(dpr(), dpr()); segPen(ctx, prev, p, cur); ctx.restore();
+        ctx.save(); setView(ctx); segPen(ctx, prev, p, cur); ctx.restore();
         if (dist(prev, p) > 4) armHold(); }
       break;
     case "shape": cur.b = p; present(); break;
@@ -673,7 +698,7 @@ function step(p) {
   }
 }
 function onUp(e) {
-  if (e.pointerType === "touch") gUp(e);
+  if (e.pointerType === "touch") { gUp(e); pinchEnd(e); }
   if (e.pointerType === "pen") { lastPenUp = performance.now(); penArmed = false; if (!e.buttons) airBtn = false; }
   dbg(e, "up");
   if (!cur || e.pointerId !== cur.pid) return;
@@ -707,7 +732,7 @@ cv.addEventListener("pointerdown", e => {
   if (e.pointerType === "pen") { clearTimeout(toggleT); toggleT = 0; penArmed = false; } // the pen landed: whatever looked like a button tap was just light contact
   dbg(e, "down"); // a pen landing always starts a stroke: its pressure can't tell a plain tip from the button (plain tips measured 0.0059, 0.0112 too)
   if (e.pointerType === "touch") {
-    gDown(e);
+    gDown(e); pinchTrack(e, true);
     if (touches.size >= 2 && cur && cur.ptype === "touch") cancelCur(); // second finger: it's a gesture, not a stroke
     if (!fingerOK || touches.size >= 2) return;
   }
@@ -719,7 +744,7 @@ cv.addEventListener("pointerup", onUp);
 cv.addEventListener("pointercancel", e => {
   dbg(e, "cancel"); if (e.pointerType === "pen") airBtn = false;
   if (cur && e.pointerId === cur.pid) cancelCur();
-  if (e.pointerType === "touch") touches.delete(e.pointerId);
+  if (e.pointerType === "touch") { touches.delete(e.pointerId); pinchEnd(e); }
 });
 cv.addEventListener("contextmenu", e => {
   e.preventDefault(); dbg(e, "ctxmenu");
@@ -735,9 +760,52 @@ function switchPenToErase() {
                    : [...objects, { id, type: "stroke", color: c.color, size: c.size, pts: c.pts }]);
   if (tool !== "eraser") { prevTool = tool; setTool("eraser"); toast("Eraser (tap the pen button for " + prevTool + ")"); }
   // protect: the eraser starts exactly where that ink ends, so don't let it delete what was just written
-  cur = { pid: c.pid, ptype: "pen", color: c.color, size: c.size, mode: "erase", pts: [last], hit: new Set(), r: Math.max(14, c.size * 3), protect: id, protectAt: last };
+  cur = { pid: c.pid, ptype: "pen", color: c.color, size: c.size, mode: "erase", pts: [last], hit: new Set(), r: Math.max(14, c.size * 3) / view.s, protect: id, protectAt: last };
   eraseAt(last); present();
 }
+
+// ---- pinch to zoom / two-finger pan (touch only; the pen never zooms) ----
+function pinchMove() {
+  pinchRaf = 0;
+  if (!pinch || tpos.size !== 2) return;
+  const [a, b] = [...tpos.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, r = cv.getBoundingClientRect();
+  const dd = Math.abs(d - pinch.d0), dm = Math.hypot(mx - pinch.mx0, my - pinch.my0);
+  if (!pinch.mode) { // decide once, then stick to it until the fingers lift: the distance changing more than the midpoint moving = zoom, else pan
+    const mv = [...tpos].map(([id, q]) => Math.hypot(q.x - pinch.p0[id].x, q.y - pinch.p0[id].y)), big = Math.max(dd, dm);
+    if (big < GESTURE_DECIDE_PX || (Math.min(...mv) < GESTURE_BOTH_PX && Math.max(...mv) < GESTURE_ONE_PX)) return; // not enough movement from both fingers yet
+    pinch.mode = dd >= dm ? "zoom" : "pan";
+  }
+  if (pinch.mode === "zoom") { // zoom around where the fingers started, no pan
+    const ns = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pinch.v0.s * d / pinch.d0));
+    const wx = (pinch.mx0 - r.left - pinch.v0.x) / pinch.v0.s, wy = (pinch.my0 - r.top - pinch.v0.y) / pinch.v0.s; // the world point that was under the fingers' midpoint
+    view.s = ns; view.x = pinch.mx0 - r.left - wx * ns; view.y = pinch.my0 - r.top - wy * ns;
+  } else { // pan: move with the fingers, keep the zoom
+    view.s = pinch.v0.s; view.x = pinch.v0.x + (mx - pinch.mx0); view.y = pinch.v0.y + (my - pinch.my0);
+  }
+  viewChanged();
+}
+function pinchTrack(e, down) { // called for every touch pointer event on the canvas
+  if (down) {
+    tpos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (tpos.size === 2 && !zoomLocked) { const [a, b] = [...tpos.values()]; pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx0: (a.x + b.x) / 2, my0: (a.y + b.y) / 2, v0: { ...view }, mode: null, p0: Object.fromEntries([...tpos].map(([id, q]) => [id, { ...q }])) }; }
+  } else if (tpos.has(e.pointerId)) {
+    tpos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && tpos.size === 2 && !pinchRaf) pinchRaf = requestAnimationFrame(pinchMove);
+  }
+}
+function pinchEnd(e) { tpos.delete(e.pointerId); if (tpos.size < 2) pinch = null; }
+wrap.addEventListener("wheel", e => { if (!e.ctrlKey) return; e.preventDefault(); if (!zoomLocked) zoomAt(view.s * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY); }, { passive: false }); // ctrl+wheel / trackpad pinch on a laptop
+$("zoompct").onclick = resetView;
+const LOCK_KEY = "sketchpad.zoomlock";
+try { zoomLocked = localStorage.getItem(LOCK_KEY) === "1"; } catch (_) { /* ignore */ }
+function applyLock() {
+  $("zoomlock").innerHTML = zoomLocked ? ICON.lock : ICON.unlock; $("zoomlock").classList.toggle("on", zoomLocked);
+  $("zoomlock").title = zoomLocked ? "Zoom locked: pinching does nothing (tap to unlock)" : "Zoom lock: pinch zoom is on (tap to lock)";
+  try { localStorage.setItem(LOCK_KEY, zoomLocked ? "1" : "0"); } catch (_) { /* ignore */ }
+  if (zoomLocked) { pinch = null; }
+}
+$("zoomlock").onclick = () => { zoomLocked = !zoomLocked; applyLock(); toast(zoomLocked ? "Zoom locked" : "Zoom unlocked"); };
+applyLock();
 
 // ---- multi-finger tap gestures: 2 fingers = undo, 3 = redo ----
 const touches = new Map(); let gMax = 0, gStart = 0, gMoved = false;
