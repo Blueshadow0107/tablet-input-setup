@@ -25,7 +25,6 @@ import android.widget.TextView;
 public class MainActivity extends Activity {
     private static final String TAG = "sketchpad";
     private WebView web;
-    private String lockedHost = "";
     private int lastButtons = -1;
 
     @Override
@@ -34,24 +33,21 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().setDecorFitsSystemWindows(false);
         getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.parseColor("#0f0a1a")));
-        hideBars();
-        WebView.setWebContentsDebuggingEnabled(true); // chrome://inspect over adb, handy for pen debugging
-        show(getIntent());
+        show();
+        hideBars(); // after the content view exists: on a cold start the decor view is still null before that
     }
 
     @Override
     protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
-        setIntent(i);
-        show(i);
+        show(); // intent extras are ignored on purpose: the address comes only from ConfigReceiver (shell-only)
     }
 
-    private void show(Intent i) {
+    private void show() {
         SharedPreferences p = getSharedPreferences("cfg", MODE_PRIVATE);
-        String url = i != null ? i.getStringExtra("url") : null;
-        if (url != null && !url.isEmpty()) p.edit().putString("url", url).apply();
-        url = p.getString("url", "");
-        if (url.isEmpty()) {
+        String url = p.getString("url", "");
+        WebView.setWebContentsDebuggingEnabled(p.getBoolean("debug", false)); // chrome://inspect only when asked for over adb
+        if (!Cfg.validUrl(url)) {
             TextView t = new TextView(this);
             t.setTextColor(Color.WHITE);
             t.setTextSize(18);
@@ -61,7 +57,6 @@ public class MainActivity extends Activity {
             return;
         }
         Uri u = Uri.parse(url);
-        lockedHost = (u.getHost() == null ? "" : u.getHost()) + ":" + u.getPort();
         if (web == null) {
             web = new WebView(this);
             web.setBackgroundColor(Color.parseColor("#0f0a1a"));
@@ -74,9 +69,9 @@ public class MainActivity extends Activity {
             s.setBuiltInZoomControls(false);
             s.setTextZoom(100);
             s.setMediaPlaybackRequiresUserGesture(true);
-            web.setWebViewClient(new LockedClient(lockedHost)); // stay on our own server
             setContentView(web);
         }
+        web.setWebViewClient(new LockedClient(Cfg.origin(u))); // re-pinned every time the address changes
         web.loadUrl(url);
     }
 

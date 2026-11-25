@@ -2,20 +2,33 @@ package local.sketchpad;
 
 import android.net.Uri;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-/** Keeps the WebView on the one host:port it was given; every other navigation is refused. */
-public class LockedClient extends WebViewClient {
-    private final String host;
+import java.io.ByteArrayInputStream;
+import java.util.HashMap;
 
-    public LockedClient(String host) {
-        this.host = host;
+/** Pins the WebView to one origin (scheme + host + port): other navigations AND other subresource requests are refused. */
+public class LockedClient extends WebViewClient {
+    private final String origin;
+
+    public LockedClient(String origin) {
+        this.origin = origin;
+    }
+
+    private boolean same(Uri u) {
+        return u != null && origin.equals(Cfg.origin(u));
     }
 
     @Override
     public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
-        Uri t = r.getUrl();
-        return !((t.getHost() == null ? "" : t.getHost()) + ":" + t.getPort()).equals(host);
+        return !same(r.getUrl());
+    }
+
+    @Override
+    public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+        if (same(r.getUrl())) return null;
+        return new WebResourceResponse("text/plain", "utf-8", 403, "Blocked", new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
     }
 }
