@@ -30,6 +30,9 @@ The user's own flowchart: **idea → they draw → they Send (either a reply ove
 ## Ink and pages
 Blank paper and every page keep their own ink. A Send over a page is that page's ink only (see `over-page=<page>` in the watcher line). The user writes with the tab in landscape but the text turned a quarter turn (reads bottom-to-top): expect sideways handwriting and rotate it in your head.
 
+## Promoting blank paper into a page
+If what they are doing on blank paper is turning into a page (a game, a diagram, a worksheet), don't leave it on blank paper: build a page that **carries the paper it had** (dots: an SVG pattern with dots at multiples of 32 px from the page's top-left, r=1.7, `#b8b0cc`; lines: vertical lines every 32 px) and `sketch put <dir> <name> --adopt`. When they tap Open, their blank-paper ink moves into the new page and blank paper is left empty. Keep the page layout fixed to the viewport (no scrolling) so their ink stays aligned with it when you re-put the page with new state.
+
 ## Putting something on the tab
 1. Write a self-contained page in a scratch dir, then `sketch put <file.html|dir> [name] --open` (without `--open` it still appears under Pages, but the tab isn't told).
 2. It appears under the **Pages** button (top left of the app). They can Draw on it with the pen, or switch to **Use** (taps and scrolling go to the page, e.g. a quiz or a calculator).

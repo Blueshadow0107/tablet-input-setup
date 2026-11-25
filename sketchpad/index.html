@@ -372,10 +372,16 @@ function renderInbox() {
   $("noteclose").onclick = () => markSeen(n.id);
 }
 function markSeen(id) { seenId = Math.max(seenId, id); queue = queue.filter(o => o.id > seenId); renderInbox(); }
+function adoptBlank(name) { // blank paper turned into a page: its ink moves into the page (the page itself carries the paper it had)
+  if (activePage === name) return;
+  const blank = activePage === "" ? objects : (store[""] ? store[""].objects : []);
+  store[name] = { objects: blank.slice(), undo: [], redo: [] };
+  if (activePage === "") { objects = []; undoStack = []; redoStack = []; } else store[""] = { objects: [], undo: [], redo: [] };
+}
 async function openInboxPage(n) {
   try {
     const r = await fetch("/api/pages", { headers: { "X-Token": token } }), pg = (await r.json()).pages.find(q => q.name === n.name);
-    if (pg) showPage(pg.name, pg.path); else toast("That page is gone", "bad");
+    if (pg) { if (n.adopt) adoptBlank(pg.name); showPage(pg.name, pg.path); } else toast("That page is gone", "bad");
   } catch (_) { toast("Could not open it", "bad"); }
   markSeen(n.id);
 }

@@ -9,7 +9,8 @@
 #                                     server (shell-only config channel) and launch it. --rebuild forces a fresh build + install
 #   sketch watch                      print one line per new Send, forever (run it under a Monitor so Claude is woken by every Send)
 #   sketch note "text"                a short message from Claude shows on the tab (dismissible banner)
-#   sketch put <file.html|dir> [name] [--open]   put a page on the tab (--open also tells the tab: dot on Pages + an Open banner) (Pages button): it is shown behind the ink, in a sandboxed iframe
+#   sketch put <file.html|dir> [name] [--open|--adopt]   put a page on the tab (--open also tells the tab: dot on Pages + an Open banner;
+#                                     --adopt = promote: when Open is tapped, the blank paper's ink moves into this page. Make the page carry the paper it had) (Pages button): it is shown behind the ink, in a sandboxed iframe
 #   sketch compose [sketch-name]      render the page a sketch was drawn over and lay the ink on top -> <name>-over-page.png
 #   sketch rotate                     make a NEW token (old bookmarks stop working) and restart
 #   sketch latest                     print the newest saved sketch (png path + caption)
@@ -45,10 +46,10 @@ print_urls() {
   fi
 }
 
-inbox_add() { # kind name text: append to <dir>/inbox.json, which the tab polls
-  python3 - "$DIR" "$1" "$2" "$3" <<'PY'
+inbox_add() { # kind name text [adopt]: append to <dir>/inbox.json, which the tab polls
+  python3 - "$DIR" "$1" "$2" "$3" "${4:-}" <<'PY'
 import fcntl, json, os, re, sys, time
-d, kind, name, text = sys.argv[1:5]
+d, kind, name, text, adopt = sys.argv[1:6]
 os.makedirs(d, exist_ok=True)
 lock = open(os.path.join(d, ".inbox.lock"), "w")
 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -60,6 +61,8 @@ except Exception:
 item = {"id": (items[-1]["id"] + 1) if items else 1, "kind": kind, "time": int(time.time())}
 if kind == "page":
     item["name"] = name
+    if adopt:
+        item["adopt"] = True   # on Open, the blank paper's ink moves into this page
     try:
         m = re.search(r"<title>(.*?)</title>", open(os.path.join(d, "pages", name, "index.html"), errors="replace").read()[:4000], re.I | re.S)
         item["title"] = (m.group(1).strip() if m else name)[:80]
@@ -144,7 +147,7 @@ case "$cmd" in
     inbox_add note "" "$*"; echo "note is on its way to the tab"
     ;;
   put)
-    open=0; pargs=(); for a in "$@"; do if [[ "$a" == "--open" ]]; then open=1; else pargs+=("$a"); fi; done
+    open=0; adopt=""; pargs=(); for a in "$@"; do if [[ "$a" == "--open" ]]; then open=1; elif [[ "$a" == "--adopt" ]]; then open=1; adopt=1; else pargs+=("$a"); fi; done
     set -- "${pargs[@]+"${pargs[@]}"}"
     src="${1:-}"; name="${2:-}"
     [[ -n "$src" && -e "$src" ]] || { echo "usage: sketch put <file.html|dir> [name]" >&2; exit 2; }
@@ -153,7 +156,7 @@ case "$cmd" in
     dest="$DIR/pages/$name"; mkdir -p "$dest"
     if [[ -d "$src" ]]; then cp -a "$src"/. "$dest"/; else cp "$src" "$dest/index.html"; fi
     [[ -f "$dest/index.html" ]] || { echo "no index.html in $dest" >&2; exit 1; }
-    if [[ "$open" == 1 ]]; then inbox_add page "$name" ""; echo "page '$name' is on the tab and the tab was told (dot on Pages + an Open banner)."
+    if [[ "$open" == 1 ]]; then inbox_add page "$name" "" "$adopt"; echo "page '$name' is on the tab and the tab was told (dot on Pages + an Open banner)."
     else echo "page '$name' is on the tab: Pages button (top left). Add --open to also notify. Keep it fit-to-screen, no scrolling, so the ink lines up."; fi
     ;;
   compose)
@@ -194,6 +197,6 @@ case "$cmd" in
     ss -ltn "sport = :$PORT" 2>/dev/null | tail -n +2 | awk '{print "listening on", $4}'
     ;;
   *)
-    sed -n '2,20p' "$0"; exit 2
+    sed -n '2,21p' "$0"; exit 2
     ;;
 esac
