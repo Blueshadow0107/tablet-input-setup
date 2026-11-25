@@ -81,7 +81,7 @@ public class MainActivity extends Activity implements Runnable {
             s.setMediaPlaybackRequiresUserGesture(true);
             setContentView(web);
         }
-        web.setWebViewClient(new LockedClient(Cfg.origin(u))); // re-pinned every time the address changes
+        web.setWebViewClient(new LockedClient(this, Cfg.origin(u))); // re-pinned every time the address changes
         web.loadUrl(url);
     }
 

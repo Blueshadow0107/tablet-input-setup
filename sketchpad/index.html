@@ -94,6 +94,7 @@
 <div id="app">
   <div id="top">
     <button id="pagesbtn" class="icon" title="Pages: put something behind your ink"></button>
+    <button id="rotbtn" class="icon" title="Rotate: lock the screen to portrait or landscape (tap to cycle)" hidden></button>
     <button id="modebtn" class="icon" title="Draw / Use: pen draws, or taps go to the page" hidden></button>
     <input id="cap" type="text" placeholder="Say what this is (optional)" autocomplete="off">
     <button id="send" class="send">Send</button>
@@ -164,6 +165,7 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   cut: SVG('<circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8 7.6L20 18M8 16.4L20 6"/>'),
   copy: SVG('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>'),
   paste: SVG('<rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V4a1 1 0 011-1h4a1 1 0 011 1v1M9.5 12h5M9.5 16h3.5"/>'),
+  rotate: SVG('<path d="M20 12a8 8 0 11-3-6.2"/><path d="M20 4v5h-5"/>'),
   pages: SVG('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
   draw: SVG('<path d="M4 20l1-4L16.5 4.5a2 2 0 013 3L8 19z"/><path d="M14 7l3 3"/>'),
   use: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
@@ -280,6 +282,21 @@ function updateUI() {
 $("undo").onclick = () => undo(); $("redo").onclick = () => redo();
 $("clear").onclick = () => { if (objects.length) { commit([]); toast("Cleared (Undo brings it back)"); } };
 $("del").onclick = deleteSel;
+// ---- screen orientation (wrapper app only): a tablet held flat or at a slant can't tell how you hold it, so this locks the view ----
+const APP = /SketchpadApp/.test(navigator.userAgent), ORIENT_KEY = "sketchpad.orient", ORIENTS = ["auto", "portrait", "landscape"];
+let orient = "auto";
+try { orient = localStorage.getItem(ORIENT_KEY) || "auto"; } catch (_) { /* ignore */ }
+function applyOrient() {
+  $("rotbtn").title = "Screen: " + orient + " (tap to change)"; $("rotbtn").classList.toggle("on", orient !== "auto");
+  try { localStorage.setItem(ORIENT_KEY, orient); } catch (_) { /* ignore */ }
+  if (APP) location.href = "sketchpad://orientation/" + orient; // handled (and cancelled) by the app
+}
+if (APP) {
+  $("rotbtn").hidden = false; $("rotbtn").innerHTML = ICON.rotate;
+  $("rotbtn").onclick = () => { orient = ORIENTS[(ORIENTS.indexOf(orient) + 1) % ORIENTS.length]; applyOrient(); toast("Screen: " + orient); };
+  if (orient !== "auto") applyOrient(); else $("rotbtn").title = "Screen: auto (tap to change)";
+}
+
 // ---- pages: something Claude wrote, shown behind the ink in a sandboxed iframe ----
 const frame = document.createElement("iframe");
 frame.id = "pageframe"; frame.setAttribute("sandbox", "allow-scripts"); frame.hidden = true; wrap.insertBefore(frame, cv);
