@@ -40,6 +40,7 @@ print_urls() {
 cmd="${1:-status}"; shift || true
 case "$cmd" in
   start)
+    case "${1:-}" in ""|--tailscale-only) ;; *) echo "sketch start: unknown option '$1' (only --tailscale-only)" >&2; exit 2 ;; esac
     envfile="$(dirname "$TOKEN_FILE")/env"
     mkdir -p "$(dirname "$envfile")"
     token >/dev/null   # create it on first run only
@@ -47,7 +48,7 @@ case "$cmd" in
       : >"$envfile"
     else
       echo "SKETCHPAD_ARGS=--also-lan" >"$envfile"
-      echo "note: the LAN link is plain HTTP; on open/shared Wi-Fi use --tailscale-only." >&2
+      echo "note: the LAN link is plain HTTP and the token is long-lived; on open/shared Wi-Fi use --tailscale-only." >&2
     fi
     chmod 600 "$envfile"
     systemctl --user restart "$UNIT"
