@@ -38,6 +38,11 @@ fi
 echo "[3/3] Installing Weylus systemd user service..."
 mkdir -p "$HOME/.config/systemd/user"
 cp "$SCRIPT_DIR/weylus.service" "$HOME/.config/systemd/user/"
+
+# --- Sketchpad (draw on the tab, save a PNG for Claude) ---
+cp "$SCRIPT_DIR/sketchpad/sketchpad.service" "$HOME/.config/systemd/user/"
+mkdir -p "$HOME/.local/bin" "$HOME/tablet-sketches" "$HOME/.config/sketchpad"
+ln -sf "$SCRIPT_DIR/sketchpad/sketch.sh" "$HOME/.local/bin/sketch"
 systemctl --user daemon-reload
 
 echo ""

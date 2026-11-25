@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Sketchpad</title>
+<style>
+  :root {
+    --bg: #0f0a1a; --bar: #1a1230; --edge: #3b2a66; --ink: #e8defc; --accent: #a78bfa;
+    --paper: #fbfaf6; --ok: #6ee7b7; --bad: #fca5a5;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink);
+    font: 15px/1.2 "FantasqueSansM Nerd Font", system-ui, sans-serif; overscroll-behavior: none; }
+  #app { display: grid; grid-template-rows: auto 1fr; height: 100dvh; }
+  #bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px;
+    background: var(--bar); border-bottom: 1px solid var(--edge); }
+  .grp { display: flex; gap: 6px; align-items: center; }
+  .sep { width: 1px; align-self: stretch; background: var(--edge); margin: 0 4px; }
+  button, input[type=text] { font: inherit; color: var(--ink); background: #261a45; border: 1px solid var(--edge);
+    border-radius: 8px; padding: 8px 12px; min-height: 40px; }
+  button:active { background: #33225c; }
+  button.on { border-color: var(--accent); background: #3a2a6e; }
+  button.send { background: var(--accent); color: #140a2a; border-color: var(--accent); font-weight: 700; }
+  .sw { width: 34px; height: 34px; min-height: 0; padding: 0; border-radius: 50%; border: 2px solid var(--edge); }
+  .sw.on { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
+  input[type=range] { width: 96px; accent-color: var(--accent); }
+  #cap { flex: 1 1 180px; min-width: 140px; }
+  #wrap { position: relative; margin: 8px; border-radius: 10px; overflow: hidden; border: 1px solid var(--edge); background: var(--paper); }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); padding: 10px 16px; border-radius: 10px;
+    background: var(--bar); border: 1px solid var(--edge); opacity: 0; pointer-events: none; transition: opacity .2s; }
+  #toast.show { opacity: 1; }
+  #toast.ok { border-color: var(--ok); } #toast.bad { border-color: var(--bad); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <div class="grp" id="colors"></div>
+    <div class="sep"></div>
+    <div class="grp">
+      <button id="pen" class="on">Pen</button>
+      <button id="eraser">Eraser</button>
+      <input id="size" type="range" min="1" max="24" value="4" aria-label="Brush size">
+    </div>
+    <div class="sep"></div>
+    <div class="grp">
+      <button id="undo">Undo</button>
+      <button id="clear">Clear</button>
+      <button id="finger" title="Allow finger drawing (off = pen only, palm ignored)">Finger: off</button>
+    </div>
+    <div class="sep"></div>
+    <input id="cap" type="text" placeholder="Say what this is (optional)" autocomplete="off">
+    <button id="send" class="send">Send</button>
+  </div>
+  <div id="wrap"><canvas id="c"></canvas></div>
+</div>
+<div id="toast" role="status"></div>
+<script>
+"use strict";
+const COLORS = ["#16121f", "#d12e4f", "#1f6feb", "#1a9b5b", "#e0881a", "#7c3aed"];
+const PAPER = "#fbfaf6";
+const MAX_EXPORT = 2000;
+const token = new URLSearchParams(location.search).get("t") || "";
+
+const wrap = document.getElementById("wrap"), cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const $ = id => document.getElementById(id);
+let color = COLORS[0], erasing = false, fingerOK = false, strokes = [], cur = null;
+
+COLORS.forEach((c, i) => {
+  const b = document.createElement("button");
+  b.className = "sw" + (i === 0 ? " on" : ""); b.style.background = c; b.setAttribute("aria-label", "colour " + c);
+  b.onclick = () => { color = c; setErase(false); document.querySelectorAll(".sw").forEach(s => s.classList.toggle("on", s === b)); };
+  $("colors").appendChild(b);
+});
+
+function setErase(on) { erasing = on; $("pen").classList.toggle("on", !on); $("eraser").classList.toggle("on", on); }
+$("pen").onclick = () => setErase(false);
+$("eraser").onclick = () => setErase(true);
+$("finger").onclick = () => { fingerOK = !fingerOK; $("finger").textContent = "Finger: " + (fingerOK ? "on" : "off"); $("finger").classList.toggle("on", fingerOK); };
+$("undo").onclick = () => { strokes.pop(); redraw(); };
+$("clear").onclick = () => { if (strokes.length) { strokes = []; redraw(); toast("Cleared"); } };
+
+function fit() {
+  const r = wrap.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  redraw();
+}
+function seg(c, a, b, s) {
+  c.strokeStyle = s.erase ? PAPER : s.color; c.lineCap = c.lineJoin = "round";
+  c.lineWidth = s.size * (0.35 + 0.9 * (b.p || 0.5));
+  c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+}
+function paint(c, scale) {
+  c.save(); c.scale(scale, scale);
+  for (const s of strokes) {
+    if (s.pts.length === 1) { const p = s.pts[0]; seg(c, p, { x: p.x + 0.01, y: p.y, p: p.p }, s); }
+    for (let i = 1; i < s.pts.length; i++) seg(c, s.pts[i - 1], s.pts[i], s);
+  }
+  c.restore();
+}
+function redraw() {
+  const dpr = window.devicePixelRatio || 1;
+  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, cv.width, cv.height); paint(ctx, dpr);
+}
+
+function pt(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 };
+}
+cv.addEventListener("pointerdown", e => {
+  if (e.pointerType === "touch" && !fingerOK) return;
+  cv.setPointerCapture(e.pointerId);
+  const eraseNow = erasing || (e.buttons & 32) !== 0; // pen's eraser end
+  cur = { color, erase: eraseNow, size: +$("size").value * (eraseNow ? 3 : 1), pts: [pt(e)], id: e.pointerId };
+  strokes.push(cur); redraw();
+});
+cv.addEventListener("pointermove", e => {
+  if (!cur || e.pointerId !== cur.id) return;
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  const dpr = window.devicePixelRatio || 1;
+  ctx.save(); ctx.scale(dpr, dpr);
+  for (const ev of (evs.length ? evs : [e])) {
+    const p = pt(ev), prev = cur.pts[cur.pts.length - 1];
+    cur.pts.push(p); seg(ctx, prev, p, cur);
+  }
+  ctx.restore();
+});
+const end = e => { if (cur && e.pointerId === cur.id) cur = null; };
+cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+cv.addEventListener("contextmenu", e => e.preventDefault());
+
+let toastTimer;
+function toast(msg, kind = "ok") {
+  const t = $("toast"); t.textContent = msg; t.className = "show " + kind;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = "", 2200);
+}
+
+$("send").onclick = async () => {
+  if (!strokes.length) return toast("Nothing drawn yet", "bad");
+  const r = wrap.getBoundingClientRect(), k = Math.min(1, MAX_EXPORT / Math.max(r.width, r.height));
+  const out = document.createElement("canvas"); out.width = Math.round(r.width * k); out.height = Math.round(r.height * k);
+  const oc = out.getContext("2d"); oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height); paint(oc, k);
+  const blob = await new Promise(res => out.toBlob(res, "image/png"));
+  $("send").disabled = true;
+  try {
+    const resp = await fetch("/api/sketch", { method: "POST", body: blob,
+      headers: { "X-Token": token, "Content-Type": "image/png", "X-Caption": encodeURIComponent($("cap").value) } });
+    const j = await resp.json();
+    if (!resp.ok) throw new Error(j.error || resp.status);
+    toast("Sent " + j.name); $("cap").value = "";
+  } catch (err) { toast("Send failed: " + err.message, "bad"); }
+  finally { $("send").disabled = false; }
+};
+
+new ResizeObserver(fit).observe(wrap);
+fit();
+</script>
+</body>
+</html>

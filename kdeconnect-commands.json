@@ -3,11 +3,11 @@
   "commands": [
     {
       "name": "OpenVSP: Fit Model",
-      "command": "xdotool key ctrl+f"
+      "command": "wtype -M ctrl -k f -m ctrl"
     },
     {
       "name": "OpenVSP: Wireframe Toggle",
-      "command": "xdotool key w"
+      "command": "wtype -k w"
     },
     {
       "name": "Screenshot Area",
@@ -20,6 +20,14 @@
     {
       "name": "Weylus: Stop",
       "command": "systemctl --user stop weylus"
+    },
+    {
+      "name": "Sketchpad: Start",
+      "command": "systemctl --user start sketchpad"
+    },
+    {
+      "name": "Sketchpad: Stop",
+      "command": "systemctl --user stop sketchpad"
     }
   ]
 }

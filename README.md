@@ -1,119 +1,54 @@
-# Tablet Input Setup — Galaxy Tab S7 FE → Linux Laptop
+# Tablet Input Setup: Galaxy Tab S7 FE → Linux laptop
 
-*Hardware: Samsung Galaxy Tab S7 FE (with S Pen)*  
-*Target: Linux (Hyprland/Wayland) laptop — OpenVSP, general CAD control, media*
+Hardware: Samsung Galaxy Tab S7 FE (SM-T733, 4 GB RAM, Android 14, S Pen).
+Laptop: Linux, Hyprland/Wayland.
+
+Two separate things live here. **Sketchpad is built and tested.** The Weylus and KDE Connect notes further down are older and have never been run end to end.
 
 ---
 
-## Weylus
+## Sketchpad: draw on the tab, show Claude
 
-Turns the tablet browser into a wireless input device + secondary display. No Android app needed.
-
-### What it gives you
-
-| Input | Mapped to | Use for OpenVSP |
-|-------|-----------|-----------------|
-| S Pen | Mouse pointer + left-click | Precise geometry selection |
-| S Pen hover | Cursor position | Preview before clicking |
-| S Pen button | Right-click | Context menus on geometry |
-| Touch (1 finger) | Mouse move + click | General UI interaction |
-| Touch (2 finger drag) | Scroll wheel | Zoom 3D view, scroll panels |
-| Pinch | Zoom | Quick zoom in/out |
-| Video stream | Mirrored or extended display | Tool palettes on tablet |
-
-### Install
+Draw on the tablet in its browser, hit Send, and a PNG (plus an optional caption) lands on the laptop where Claude can read it. No app on the tablet, and it's light on its 4 GB of RAM.
 
 ```bash
-# Download static binary
-wget https://github.com/H-M-H/Weylus/releases/latest/download/weylus_linux
-chmod +x weylus_linux
-sudo mv weylus_linux /usr/local/bin/weylus
-
-# Run
-weylus
+sketch start          # serve over Tailscale (default); prints the URL for the tab
+sketch start --lan    # serve on the Wi-Fi address instead (token still required)
+sketch url [--lan]    # print the URL again
+sketch latest         # path + caption of the newest sketch
+sketch stop
 ```
 
-### Connect
+Then tell Claude "check my latest sketch". It reads `~/tablet-sketches/latest.png` and `latest.txt`.
 
-1. Laptop: `weylus` (starts server on port 1701)
-2. Tablet: open browser → `http://<laptop-ip>:1701`
-3. Tablet: fullscreen the page → start using pen/touch
+- **Pen only by default.** Finger and palm touches are ignored; the *Finger* button turns finger drawing on. The pen's eraser end erases.
+- **Auth.** Every request needs a random token (`~/.config/sketchpad/token`, mode 600). Over Tailscale nothing is exposed on the local Wi-Fi. `--lan` listens on all interfaces, so on shared Wi-Fi others can see the port; the token is what protects it.
+- **Saved files.** `~/tablet-sketches/<timestamp>.png` + `.txt`, and `latest.png` / `latest.txt` symlinks.
+- **Not enabled at boot.** `sketchpad.service` starts only when you run `sketch start`.
 
-### Tips
-
-- Use **Trackpad mode** in Weylus settings for relative movement (better for reaching UI corners)
-- Lower video quality → lower latency if only using as input (not display)
-- The S Pen has ~9ms latency on this tablet; Weylus adds ~10-20ms over WiFi
-- Wired connection (USB tethering) drops latency noticeably
+Code: `sketchpad/server.py` (stdlib only), `sketchpad/index.html`, `sketchpad/sketch.sh`, `sketchpad/sketchpad.service`. Install with `./install.sh`.
 
 ---
 
-## KDE Connect
+## Weylus (untested)
 
-Android ↔ Linux integration suite. Free, in repos, good for shortcuts/macros.
+Turns the tablet browser into a wireless pen/touch input device and second display. Installed at `/usr/local/bin/weylus`; the unit `weylus.service` is linked but has never been enabled.
 
-### What it gives you
+Intended use: S Pen as a pointer for CAD (OpenVSP), `http://<laptop-ip>:1701` in the tablet browser. **None of the behaviour below has been measured here**; the README used to claim specific latencies and pen-button mappings, which were taken from Weylus's docs, not tested.
 
-| Feature | Use |
-|---------|-----|
-| Touchpad | Tablet screen = trackpad (move, click, scroll, 3-finger gestures) |
-| Presentation remote | Volume keys → custom shortcuts |
-| Remote commands | Run shell scripts from tablet |
-| File sharing | Drag/drop files between devices |
-| Notification sync | Tablet shows laptop notifications |
-| Media control | Play/pause, skip, volume |
+Open questions to check before relying on it:
+- Does it get pen pressure on Hyprland/Wayland (screen capture path)?
+- Real latency over this Wi-Fi.
+- Is the tab fast enough to run the browser stream smoothly (it was RAM-starved).
 
-### Install
+Note that Weylus listens on port 1701 on all interfaces with no token by default; don't leave it running on shared Wi-Fi.
 
-```bash
-sudo apt install kdeconnect
-```
+## KDE Connect (untested)
 
-Tablet: install **KDE Connect** from Galaxy Store.
-
-Pair: both devices on same WiFi → accept pairing request.
-
-### OpenVSP Shortcuts Idea
-
-In KDE Connect → **Remote Commands**, add:
-
-| Name | Command | Bound to |
-|------|---------|----------|
-| Fit Model | `xdotool key ctrl+f` | Tablet button |
-| Wireframe | `xdotool key w` | Tablet button |
-| Screenshot | `grim -g "$(slurp)" ~/Pictures/vsp-$(date +%s).png` | Tablet button |
-| Export STL | script calling OpenVSP CLI | Tablet button |
+`kdeconnect-commands.json` has remote-command ideas for the tablet. They were first written with `xdotool`, which does not work on a Wayland session, so they now use `wtype` (also untested). Pair the tablet in the KDE Connect app first.
 
 ---
 
-## Comparison
+## Tablet state (2026-11-25)
 
-| | Weylus | KDE Connect | Spacedesk |
-|--|--------|-------------|-----------|
-| **S Pen pressure** | ✅ Yes | ❌ No | ⚠️ Limited |
-| **Video stream** | ✅ Yes | ❌ No | ✅ Yes |
-| **Latency** | Low (~20ms) | N/A (input only) | Medium (~40ms) |
-| **Needs Android app** | ❌ Browser only | ✅ Yes | ✅ Yes |
-| **Linux support** | ✅ Native | ✅ Native | ⚠️ Basic viewer |
-| **Best for** | Pen CAD work | Shortcuts/files | Second monitor |
-
----
-
-## Recommended Stack
-
-- **Primary input:** Weylus (S Pen precision for CAD)
-- **Shortcuts/macros:** KDE Connect (custom buttons for common actions)
-- **File drops:** KDE Connect (send .vsp3, .stp, screenshots)
-
----
-
-## Next Steps
-
-- [ ] Test Weylus latency with OpenVSP
-- [ ] Map KDE Connect remote commands to frequent OpenVSP actions
-- [ ] Try USB tethering vs WiFi for Weylus latency comparison
-- [ ] Set up `systemd --user` service for Weylus auto-start
-
----
-
-*Started: 2026-04-13*
+Cleaned up over adb (wireless debugging; USB never enumerated): power saving off, Samsung bloat and unused apps removed, caches cleared. Security patch is June 2025. A custom ROM was considered and parked: S Pen support on the T733 builds is unverified.

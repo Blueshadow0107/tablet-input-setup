@@ -1,0 +1,17 @@
+[Unit]
+Description=Tablet sketchpad (draw on the tab, save a PNG for Claude)
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/sketchpad/env
+ExecStart=/usr/bin/python3 -I %h/Projects/tablet-input-setup/sketchpad/server.py $SKETCHPAD_ARGS
+Restart=on-failure
+RestartSec=3
+MemoryMax=200M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=%h/tablet-sketches %h/.config/sketchpad
+BindReadOnlyPaths=%h/Projects/tablet-input-setup/sketchpad
+
+# Not enabled by default: start it with `sketch start` when you want it.
