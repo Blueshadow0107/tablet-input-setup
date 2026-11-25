@@ -95,6 +95,7 @@
 <div id="app">
   <div id="top">
     <button id="pagesbtn" class="icon" title="Pages: put something behind your ink"></button>
+    <button id="paperbtn" class="icon" title="Paper: blank / dots / grid / lines (tap to change)"></button>
     <button id="rotbtn" class="icon" title="Rotate: lock the screen to portrait or landscape (tap to cycle)" hidden></button>
     <button id="modebtn" class="icon" title="Draw / Use: pen draws, or taps go to the page" hidden></button>
     <button id="zoompct" class="icon" title="Zoom: tap to reset to 100%" hidden></button>
@@ -149,6 +150,8 @@ const FILL_TOL = 150;          // bucket fill: how far (sum of R+G+B differences
 const ZOOM_MIN = 0.5, ZOOM_MAX = 8; // pinch / wheel zoom limits
 const GESTURE_DECIDE_PX = 14;       // two fingers must move this far before the gesture is decided: pinch (zoom) or drag together (pan)
 const GESTURE_BOTH_PX = 6, GESTURE_ONE_PX = 90; // ...and BOTH fingers must have moved a little (each finger reports separately), unless one has clearly moved far
+const PAPER_STYLES = ["blank", "dots", "grid", "lines"]; // built-in paper: drawn in world space, so it fills the canvas at any zoom/pan and in the sent image
+const PAPER_STEP = 32, PAPER_INK = "#b8b0cc", PAPER_DOT = 1.7;
 const PASTE_OFFSET = 24;       // each paste lands this many px down-right of the last one, so copies don't hide the original
 const PEN_LIFT_GUARD_MS = 150; // no side-button toggle this soon after the pen last touched (a lifting tip reports buttons=1 with tiny pressure)
 const TOGGLE_DELAY_MS = 90;    // the toggle waits this long and is cancelled if the pen lands: light contact looks like a button press until the pointerdown arrives
@@ -174,6 +177,7 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   rotate: SVG('<path d="M20 12a8 8 0 11-3-6.2"/><path d="M20 4v5h-5"/>'),
   lock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>'),
   unlock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.5-1.5"/>'),
+  paper: SVG('<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M9.3 4v16M14.7 4v16M4 9.3h16M4 14.7h16"/>'),
   pages: SVG('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
   draw: SVG('<path d="M4 20l1-4L16.5 4.5a2 2 0 013 3L8 19z"/><path d="M14 7l3 3"/>'),
   use: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
@@ -199,6 +203,7 @@ let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new 
 let activePage = "", useMode = false; // page shown behind the ink; Use = taps go to the page instead of the pen
 let view = { s: 1, x: 0, y: 0 }; // zoom + pan: screen px = world px * s + (x, y). Objects live in world px; the SENT image is always the unzoomed canvas
 let zoomLocked = false, pinch = null, pinchRaf = 0; const tpos = new Map();
+let paperStyle = "blank";
 let clip = [], pasteN = 0; // clipboard: deep copies of the objects last copied/cut
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
 // S Pen side button = TAP TO TOGGLE Pen <-> Eraser. On Samsung + Chrome the only reliable signals are: a hover move with buttons=1 and ~0 pressure (button
@@ -307,6 +312,18 @@ if (APP) {
   $("rotbtn").onclick = () => { orient = ORIENTS[(ORIENTS.indexOf(orient) + 1) % ORIENTS.length]; applyOrient(); toast("Screen: " + orient); };
   if (orient !== "auto") applyOrient(); else $("rotbtn").title = "Screen: auto (tap to change)";
 }
+
+// ---- paper style: blank / dots / grid / lines (remembered) ----
+const PAPER_KEY = "sketchpad.paper";
+try { const v = localStorage.getItem(PAPER_KEY); if (PAPER_STYLES.includes(v)) paperStyle = v; } catch (_) { /* ignore */ }
+$("paperbtn").innerHTML = ICON.paper;
+function applyPaper() {
+  $("paperbtn").classList.toggle("on", paperStyle !== "blank"); $("paperbtn").title = "Paper: " + paperStyle + " (tap to change)";
+  try { localStorage.setItem(PAPER_KEY, paperStyle); } catch (_) { /* ignore */ }
+  rebase(); present();
+}
+$("paperbtn").onclick = () => { paperStyle = PAPER_STYLES[(PAPER_STYLES.indexOf(paperStyle) + 1) % PAPER_STYLES.length]; applyPaper(); toast("Paper: " + paperStyle); };
+$("paperbtn").classList.toggle("on", paperStyle !== "blank");
 
 // ---- pages: something Claude wrote, shown behind the ink in a sandboxed iframe ----
 const frame = document.createElement("iframe");
@@ -526,10 +543,27 @@ function zoomAt(ns, cx, cy) { // keep the world point under (cx, cy) (client px)
   view.s = ns; view.x = cx - r.left - wx * ns; view.y = cy - r.top - wy * ns; viewChanged();
 }
 function resetView() { view = { s: 1, x: 0, y: 0 }; viewChanged(); }
+function drawPaperPattern(c, x0, y0, x1, y1, hair) { // hair: width of a hairline in world px (1 device pixel on screen)
+  if (paperStyle === "blank") return;
+  const st = PAPER_STEP, ax = Math.ceil(x0 / st) * st, ay = Math.ceil(y0 / st) * st;
+  c.save();
+  if (paperStyle === "dots") {
+    c.fillStyle = PAPER_INK; c.beginPath();
+    for (let x = ax; x <= x1; x += st) for (let y = ay; y <= y1; y += st) { c.moveTo(x + PAPER_DOT, y); c.arc(x, y, PAPER_DOT, 0, 2 * Math.PI); }
+    c.fill();
+  } else {
+    c.strokeStyle = PAPER_INK; c.lineWidth = hair; c.globalAlpha = 0.7; c.beginPath();
+    for (let y = ay; y <= y1; y += st) { c.moveTo(x0, y); c.lineTo(x1, y); }
+    if (paperStyle === "grid") for (let x = ax; x <= x1; x += st) { c.moveTo(x, y0); c.lineTo(x, y1); }
+    c.stroke();
+  }
+  c.restore();
+}
 function rebase() {
   base.width = cv.width; base.height = cv.height;
   if (activePage) bctx.clearRect(0, 0, base.width, base.height); else { bctx.fillStyle = PAPER; bctx.fillRect(0, 0, base.width, base.height); } // see-through over a page
   bctx.save(); setView(bctx);
+  if (!activePage) { const d = dpr(); drawPaperPattern(bctx, -view.x / view.s, -view.y / view.s, (base.width / d - view.x) / view.s, (base.height / d - view.y) / view.s, Math.max(1, 1 / (view.s * d))); }
   for (const o of objects) if (!hidden.has(o.id)) drawObj(bctx, o);
   bctx.restore();
 }
@@ -848,7 +882,9 @@ $("send").onclick = async () => {
   const W = x1 - x0, H = y1 - y0, k = Math.min(dpr(), MAX_EXPORT / Math.max(W, H)); // the screen's real resolution (not half of it), capped at MAX_EXPORT on the long side
   const out = document.createElement("canvas"); out.width = Math.round(W * k); out.height = Math.round(H * k);
   const oc = out.getContext("2d"); if (!activePage) { oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height); } // over a page the PNG is transparent ink only
-  oc.scale(k, k); oc.translate(-x0, -y0); for (const o of objects) drawObj(oc, o);
+  oc.scale(k, k); oc.translate(-x0, -y0);
+  if (!activePage) drawPaperPattern(oc, x0, y0, x1, y1, Math.max(1, 1 / k));
+  for (const o of objects) drawObj(oc, o);
   const blob = await new Promise(res => out.toBlob(res, "image/png"));
   $("send").disabled = true;
   try {
