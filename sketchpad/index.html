@@ -66,7 +66,12 @@
   button:active { background: #33225c; }
   button.on { border-color: var(--accent); background: #3a2a6e; }
   button:disabled { opacity: .4; }
-  button.send { background: var(--accent); color: #140a2a; border-color: var(--accent); font-weight: 700; }
+  button.send { background: var(--accent); color: #140a2a; border-color: var(--accent); font-weight: 700; min-width: 112px; }
+  button.send.done { background: var(--ok); border-color: var(--ok); }
+  button.send.fail { background: var(--bad); border-color: var(--bad); }
+  button.send:disabled { opacity: 1; }
+  .spin { display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px; border: 2.5px solid #140a2a44; border-top-color: #140a2a; border-radius: 50%; animation: sp .7s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
   button.danger { border-color: #7f3a52; }
   .sw { width: 34px; height: 34px; min-height: 0; padding: 0; border-radius: 50%; border: 2px solid var(--edge); }
   .sw.on { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
@@ -97,6 +102,7 @@
     <button id="pagesbtn" class="icon" title="Pages: put something behind your ink"></button>
     <button id="paperbtn" class="icon" title="Paper: blank / dots / lines (tap to change)"></button>
     <button id="rotbtn" class="icon" title="Rotate: lock the screen to portrait or landscape (tap to cycle)" hidden></button>
+    <button id="refreshbtn" class="icon" title="Refresh the page (Claude may have updated it)" hidden></button>
     <button id="modebtn" class="icon" title="Draw / Use: pen draws, or taps go to the page" hidden></button>
     <button id="zoompct" class="icon" title="Zoom: tap to reset to 100%" hidden></button>
     <button id="zoomlock" class="icon" title="Zoom lock: pinch zoom is on (tap to lock)"></button>
@@ -178,6 +184,7 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   lock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>'),
   unlock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.5-1.5"/>'),
   paper: SVG('<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M9.3 4v16M14.7 4v16M4 9.3h16M4 14.7h16"/>'),
+  refresh: SVG('<path d="M20 12a8 8 0 11-2.6-5.9"/><path d="M20 4v6h-6"/>'),
   pages: SVG('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
   draw: SVG('<path d="M4 20l1-4L16.5 4.5a2 2 0 013 3L8 19z"/><path d="M14 7l3 3"/>'),
   use: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
@@ -339,6 +346,7 @@ function switchInk(name) {
 function showPage(name, path) { // path = the short-lived /p/<capability>/<name>/ link the server minted in /api/pages (never the long-lived token)
   if (name !== activePage) switchInk(name);
   $("paperbtn").hidden = !!name; // paper is a blank-paper thing; a page is its own background
+  $("refreshbtn").hidden = !name;
   activePage = name; frame.hidden = !name; frame.src = name ? path : "about:blank";
   $("modebtn").hidden = !name; setMode(false); viewChanged();
 }
@@ -357,6 +365,18 @@ $("pagesbtn").onclick = async () => {
   const r = $("pagesbtn").getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = r.left + "px"; pop.hidden = false;
 };
 document.addEventListener("pointerdown", e => { if (!$("pagespop").hidden && !$("pagespop").contains(e.target) && !$("pagesbtn").contains(e.target)) $("pagespop").hidden = true; }, true);
+
+// Refresh the page that is open (Claude updated it): a fresh short-lived link makes the frame reload; the ink is untouched.
+$("refreshbtn").innerHTML = ICON.refresh;
+async function refreshPage(quiet) {
+  if (!activePage) return false;
+  try {
+    const r = await fetch("/api/pages", { headers: { "X-Token": token } }), pg = (await r.json()).pages.find(q => q.name === activePage);
+    if (!pg) { if (!quiet) toast("That page is gone", "bad"); return false; }
+    frame.src = pg.path; if (!quiet) toast("Page refreshed"); return true;
+  } catch (_) { if (!quiet) toast("Could not refresh", "bad"); return false; }
+}
+$("refreshbtn").onclick = () => refreshPage(false);
 
 // ---- inbox: new pages / notes from Claude (written by `sketch put --open` / `sketch note`), polled; shown as a dot on Pages + a banner ----
 // A banner stays until you dismiss it (or open the page). A refresh clears whatever is left: each load starts from "everything already there is seen".
@@ -413,7 +433,10 @@ async function pollInbox() {
   let items;
   try { const r = await fetch("/api/inbox", { headers: { "X-Token": token } }); if (!r.ok) return; items = (await r.json()).items; } catch (_) { return; }
   if (seenId === null) seenId = items.reduce((m, o) => Math.max(m, o.id), 0); // first poll of this load: what is already there counts as seen
-  const next = items.filter(o => o.id > seenId).sort((x, y) => x.id - y.id);
+  let next = items.filter(o => o.id > seenId).sort((x, y) => x.id - y.id);
+  // an update to the page that is ALREADY open refreshes it in place (no banner, no tapping); it waits while a stroke is in progress
+  if (!cur) for (const o of next) if (o.kind === "page" && o.name === activePage && !o.adopt) { if (await refreshPage(true)) { toast("Page updated"); seenId = Math.max(seenId, o.id); } }
+  next = next.filter(o => o.id > seenId);
   if (next.map(o => o.id).join() !== queue.map(o => o.id).join()) { queue = next; renderInbox(); }
 }
 setInterval(pollInbox, POLL_MS); pollInbox();
@@ -916,8 +939,19 @@ function toast(msg, kind = "ok") {
   const t = $("toast"); t.textContent = msg; t.className = "show " + kind;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = "", 2200);
 }
+// Send shows what it is doing: a spinner + "Sending…" from the first tap (the export itself takes a moment), then "✓ Sent" / "Failed"; no double sends meanwhile
+let sendT = 0;
+function setSend(state) {
+  const b = $("send"); clearTimeout(sendT);
+  b.disabled = state === "busy"; b.classList.toggle("done", state === "done"); b.classList.toggle("fail", state === "fail");
+  b.innerHTML = state === "busy" ? '<span class="spin"></span>Sending…' : state === "done" ? "✓ Sent" : state === "fail" ? "Failed" : "Send";
+  if (state === "done" || state === "fail") sendT = setTimeout(() => setSend("idle"), state === "done" ? 1600 : 2600);
+}
 $("send").onclick = async () => {
+  if ($("send").disabled) return;
   if (!objects.length) return toast("Nothing drawn yet", "bad");
+  setSend("busy");
+  await new Promise(res => requestAnimationFrame(() => setTimeout(res, 0))); // let the spinner paint before the heavy export
   // The sent image covers the original canvas AND any ink outside it (zoom/pan lets you write past its edge), never the zoom itself.
   const r = wrap.getBoundingClientRect(), ink = bboxOf(objects.filter(o => o.type !== "fill"));
   let x0 = 0, y0 = 0, x1 = r.width, y1 = r.height;
@@ -929,16 +963,14 @@ $("send").onclick = async () => {
   if (!activePage) drawPaperPattern(oc, x0, y0, x1, y1, Math.max(1, 1 / k));
   for (const o of objects) drawObj(oc, o);
   const blob = await new Promise(res => out.toBlob(res, "image/png"));
-  $("send").disabled = true;
   try {
     const resp = await fetch("/api/sketch", { method: "POST", body: blob,
       headers: { "X-Token": token, "Content-Type": "image/png", "X-Caption": encodeURIComponent($("cap").value),
         ...(activePage ? { "X-Page": activePage, "X-Viewport": Math.round(r.width) + "x" + Math.round(r.height), "X-Origin": x0.toFixed(1) + "," + y0.toFixed(1), "X-Scale": k.toFixed(4) } : {}) } });
     const j = await resp.json();
     if (!resp.ok) throw new Error(j.error || resp.status);
-    toast("Sent " + j.name); $("cap").value = "";
-  } catch (err) { toast("Send failed: " + err.message, "bad"); }
-  finally { $("send").disabled = false; }
+    toast("Sent " + j.name); $("cap").value = ""; setSend("done");
+  } catch (err) { toast("Send failed: " + err.message, "bad"); setSend("fail"); }
 };
 
 new ResizeObserver(fit).observe(wrap);
