@@ -39,6 +39,11 @@
   #app.right #shapes, #app.right #sizepop { left: auto; right: calc(100% + 6px); }
   #sizepop { padding: 12px 14px; } #sizepop input { width: 150px; display: block; }
   #app.right #collapse svg { transform: scaleX(-1); }
+  #pageframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--paper); }
+  #top button.icon { width: 42px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; flex: none; }
+  #top svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #pagespop { position: fixed; z-index: 6; min-width: 220px; max-width: 320px; padding: 6px; background: var(--bar); border: 1px solid var(--edge); border-radius: 12px; box-shadow: 0 8px 24px #0008; display: flex; flex-direction: column; gap: 4px; }
+  #pagespop button { text-align: left; }
   #selbar { position: absolute; z-index: 3; display: flex; gap: 2px; padding: 4px; background: var(--bar); border: 1px solid var(--edge); border-radius: 14px; box-shadow: 0 6px 20px #0009; }
   #selbar button { width: 42px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; }
   #selbar svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -80,6 +85,8 @@
 <body>
 <div id="app">
   <div id="top">
+    <button id="pagesbtn" class="icon" title="Pages: put something behind your ink"></button>
+    <button id="modebtn" class="icon" title="Draw / Use: pen draws, or taps go to the page" hidden></button>
     <input id="cap" type="text" placeholder="Say what this is (optional)" autocomplete="off">
     <button id="send" class="send">Send</button>
     <span id="dbg" hidden></span>
@@ -111,6 +118,7 @@
     <button id="reopen" title="Show the panel"></button>
   </div>
 </div>
+<div id="pagespop" hidden></div>
 <div id="pick" hidden>
   <canvas id="wheel"></canvas>
   <div class="row"><span>Light</span><input id="lum" type="range" min="0" max="100" aria-label="Lightness"></div>
@@ -146,6 +154,9 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   cut: SVG('<circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8 7.6L20 18M8 16.4L20 6"/>'),
   copy: SVG('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>'),
   paste: SVG('<rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V4a1 1 0 011-1h4a1 1 0 011 1v1M9.5 12h5M9.5 16h3.5"/>'),
+  pages: SVG('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
+  draw: SVG('<path d="M4 20l1-4L16.5 4.5a2 2 0 013 3L8 19z"/><path d="M14 7l3 3"/>'),
+  use: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
   flip: SVG('<path d="M7 8h12l-3-3M17 16H5l3 3"/>'), collapse: SVG('<path d="M15 5l-7 7 7 7"/>'), reopen: SVG('<path d="M15 5l-7 7 7 7"/>'),
 };
 const MAX_EXPORT = 2000;       // longest side of the sent PNG
@@ -163,6 +174,7 @@ const wrap = document.getElementById("wrap"), cv = document.getElementById("c"),
 const base = document.createElement("canvas"), bctx = base.getContext("2d"); // committed objects, redrawn only when they change
 const $ = id => document.getElementById(id);
 let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
+let activePage = "", useMode = false; // page shown behind the ink; Use = taps go to the page instead of the pen
 let clip = [], pasteN = 0; // clipboard: deep copies of the objects last copied/cut
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
 // S Pen side button = TAP TO TOGGLE Pen <-> Eraser. On Samsung + Chrome the only reliable signals are: a hover move with buttons=1 and ~0 pressure (button
@@ -257,6 +269,31 @@ function updateUI() {
 $("undo").onclick = () => undo(); $("redo").onclick = () => redo();
 $("clear").onclick = () => { if (objects.length) { commit([]); toast("Cleared (Undo brings it back)"); } };
 $("del").onclick = deleteSel;
+// ---- pages: something Claude wrote, shown behind the ink in a sandboxed iframe ----
+const frame = document.createElement("iframe");
+frame.id = "pageframe"; frame.setAttribute("sandbox", "allow-scripts"); frame.hidden = true; wrap.insertBefore(frame, cv);
+$("pagesbtn").innerHTML = ICON.pages;
+function setMode(use) { useMode = use; cv.style.pointerEvents = use ? "none" : ""; $("modebtn").innerHTML = use ? ICON.use : ICON.draw; $("modebtn").classList.toggle("on", use); $("modebtn").title = use ? "Use: taps go to the page (tap for Draw)" : "Draw: the pen draws (tap for Use)"; }
+function showPage(name) {
+  activePage = name; frame.hidden = !name; frame.src = name ? `/p/${encodeURIComponent(token)}/${encodeURIComponent(name)}/` : "about:blank";
+  $("modebtn").hidden = !name; setMode(false); rebase(); present();
+}
+$("modebtn").onclick = () => setMode(!useMode);
+$("pagesbtn").onclick = async () => {
+  const pop = $("pagespop");
+  if (!pop.hidden) { pop.hidden = true; return; }
+  let pages = [];
+  try { const r = await fetch("/api/pages", { headers: { "X-Token": token } }); pages = r.ok ? (await r.json()).pages : []; } catch (_) { /* offline: just the blank option */ }
+  pop.innerHTML = "";
+  for (const [name, title] of [["", "Blank paper"], ...pages.map(q => [q.name, q.title])]) {
+    const b = document.createElement("button"); b.textContent = title; b.classList.toggle("on", name === activePage);
+    b.onclick = () => { pop.hidden = true; showPage(name); }; pop.appendChild(b);
+  }
+  if (!pages.length) { const n = document.createElement("div"); n.style.cssText = "padding:4px 8px;opacity:.7;font-size:13px"; n.textContent = "No pages yet. Ask Claude to put one here."; pop.appendChild(n); }
+  const r = $("pagesbtn").getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = r.left + "px"; pop.hidden = false;
+};
+document.addEventListener("pointerdown", e => { if (!$("pagespop").hidden && !$("pagespop").contains(e.target) && !$("pagesbtn").contains(e.target)) $("pagespop").hidden = true; }, true);
+
 // ---- cut / copy / paste of the selected objects (fills are not selectable, so they are not copied) ----
 const cloneObj = (o, d) => ({ ...mapObj(o, q => ({ x: q.x + d, y: q.y + d })), id: nextId++ });
 function copySel() { if (!sel.size) return; clip = selObjs().map(o => structuredClone(o)); pasteN = 0; updateUI(); present(); toast("Copied " + clip.length); }
@@ -407,7 +444,7 @@ function segPen(c, a, b, o) {
 }
 function rebase() {
   base.width = cv.width; base.height = cv.height;
-  bctx.fillStyle = PAPER; bctx.fillRect(0, 0, base.width, base.height);
+  if (activePage) bctx.clearRect(0, 0, base.width, base.height); else { bctx.fillStyle = PAPER; bctx.fillRect(0, 0, base.width, base.height); } // see-through over a page
   bctx.save(); bctx.scale(dpr(), dpr());
   for (const o of objects) if (!hidden.has(o.id)) drawObj(bctx, o);
   bctx.restore();
@@ -419,7 +456,7 @@ function xfFn() { // current drag transform for the selection, or null
   return null;
 }
 function present() {
-  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(base, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(base, 0, 0); // clear first: the base is see-through over a page
   ctx.save(); ctx.scale(dpr(), dpr());
   const f = xfFn();
   if (cur) {
@@ -672,13 +709,14 @@ $("send").onclick = async () => {
   if (!objects.length) return toast("Nothing drawn yet", "bad");
   const r = wrap.getBoundingClientRect(), k = Math.min(1, MAX_EXPORT / Math.max(r.width, r.height));
   const out = document.createElement("canvas"); out.width = Math.round(r.width * k); out.height = Math.round(r.height * k);
-  const oc = out.getContext("2d"); oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height);
+  const oc = out.getContext("2d"); if (!activePage) { oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height); } // over a page the PNG is transparent ink only
   oc.scale(k, k); for (const o of objects) drawObj(oc, o);
   const blob = await new Promise(res => out.toBlob(res, "image/png"));
   $("send").disabled = true;
   try {
     const resp = await fetch("/api/sketch", { method: "POST", body: blob,
-      headers: { "X-Token": token, "Content-Type": "image/png", "X-Caption": encodeURIComponent($("cap").value) } });
+      headers: { "X-Token": token, "Content-Type": "image/png", "X-Caption": encodeURIComponent($("cap").value),
+        ...(activePage ? { "X-Page": activePage, "X-Viewport": Math.round(r.width) + "x" + Math.round(r.height) } : {}) } });
     const j = await resp.json();
     if (!resp.ok) throw new Error(j.error || resp.status);
     toast("Sent " + j.name); $("cap").value = "";

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -31,6 +32,11 @@ DEFAULT_PORT = 5099
 MAX_BYTES = 12 * 1024 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_CAPTION = 2000
+PAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+VIEWPORT = re.compile(r"^\d{2,5}x\d{2,5}$")
+# Pages are plain files written by Claude into <sketch dir>/pages/<name>/ (index.html + assets). They run in a sandboxed iframe with NO same-origin
+# access (CSP sandbox + the iframe's own sandbox attribute), so a page can run scripts but cannot read the token or call the sketchpad API.
+PAGE_CSP = "sandbox allow-scripts"
 
 
 def load_token() -> str:
@@ -94,6 +100,17 @@ class Listeners:
             print(f"sketchpad on http://{host}:{self.port}/?t=<token>  ->  {Handler.out_dir}", file=sys.stderr, flush=True)
 
 
+def list_pages(pages_dir: Path) -> list[dict]:
+    out = []
+    if pages_dir.is_dir():
+        for d in sorted(pages_dir.iterdir()):
+            idx = d / "index.html"
+            if d.is_dir() and PAGE_NAME.match(d.name) and idx.is_file():
+                m = re.search(r"<title>(.*?)</title>", idx.read_text(errors="replace")[:4000], re.I | re.S)
+                out.append({"name": d.name, "title": (m.group(1).strip() if m else d.name)[:80]})
+    return out
+
+
 def save_sketch(out_dir: Path, png: bytes, caption: str) -> str:
     """Write <stamp>.png (+ .txt), then repoint latest.png / latest.txt atomically."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -120,6 +137,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:  # keep the token out of logs, keep the status
         line = re.sub(r"([?&]t=)[^ &\"]*", r"\1<token>", fmt % args)
+        line = re.sub(r"(/p/)[^/ \"]+", r"\1<token>", line)  # page URLs carry the token in the path
         sys.stderr.write("%s %s\n" % (self.address_string(), line))
 
     def _authed(self) -> bool:
@@ -127,9 +145,11 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("X-Token") or (q.get("t") or [""])[0]
         return hmac.compare_digest(given.encode(), self.token.encode())
 
-    def _send(self, status: int, body: bytes, ctype: str) -> None:
+    def _send(self, status: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -142,8 +162,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/favicon.ico":  # browsers ask without the token; nothing to leak
             return self._send(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
+        m = re.match(r"^/p/([^/]+)/([A-Za-z0-9_.-]+)/(.*)$", path)
+        if m:  # /p/<token>/<page>/<file>: the token is in the path so a page's relative links (css, js, images) keep working
+            if not hmac.compare_digest(unquote(m.group(1)).encode(), self.token.encode()):
+                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
+            return self._serve_page(m.group(2), unquote(m.group(3)))
         if not self._authed():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
+        if path == "/api/pages":
+            return self._json(HTTPStatus.OK, {"pages": list_pages(self.out_dir / "pages")})
         if path == "/":
             tok = (parse_qs(urlparse(self.path).query).get("t") or [""])[0] or self.headers.get("X-Token", "")
             page = (HERE / "index.html").read_bytes().replace(b"__TOKEN__", re.sub(r"[^A-Za-z0-9_-]", "", tok).encode())  # the manifest/icon links carry the same token
@@ -159,6 +186,16 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/icon-192.png", "/icon-512.png"):
             return self._send(HTTPStatus.OK, (HERE / "icons" / path[1:]).read_bytes(), "image/png")
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _serve_page(self, name: str, rel: str) -> None:
+        base = (self.out_dir / "pages" / name).resolve()
+        target = (base / (rel or "index.html")).resolve() if not rel.endswith("/") else (base / rel / "index.html").resolve()
+        if not base.is_dir() or not target.is_relative_to(base) or not target.is_file():  # no traversal, files only
+            return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+            ctype += "; charset=utf-8"
+        self._send(HTTPStatus.OK, target.read_bytes(), ctype, {"Content-Security-Policy": PAGE_CSP, "X-Content-Type-Options": "nosniff"})
 
     def do_POST(self) -> None:
         if not self._authed():
@@ -185,6 +222,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "not a PNG"})
         caption = unquote(self.headers.get("X-Caption", ""))[:MAX_CAPTION]
         name = save_sketch(self.out_dir, png, caption)
+        page, vp = self.headers.get("X-Page", ""), self.headers.get("X-Viewport", "")
+        if page and PAGE_NAME.match(page) and VIEWPORT.match(vp):  # ink drawn over a page: remember which page and at what size, so it can be composited later
+            (self.out_dir / f"{name}.json").write_text(json.dumps({"page": page, "viewport": vp, "ink": f"{name}.png"}))
         print(f"saved {name} ({len(png)} bytes, caption {len(caption)} chars)", file=sys.stderr, flush=True)
         self._json(HTTPStatus.OK, {"ok": True, "name": name})
 
