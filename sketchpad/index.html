@@ -274,8 +274,8 @@ const frame = document.createElement("iframe");
 frame.id = "pageframe"; frame.setAttribute("sandbox", "allow-scripts"); frame.hidden = true; wrap.insertBefore(frame, cv);
 $("pagesbtn").innerHTML = ICON.pages;
 function setMode(use) { useMode = use; cv.style.pointerEvents = use ? "none" : ""; $("modebtn").innerHTML = use ? ICON.use : ICON.draw; $("modebtn").classList.toggle("on", use); $("modebtn").title = use ? "Use: taps go to the page (tap for Draw)" : "Draw: the pen draws (tap for Use)"; }
-function showPage(name) {
-  activePage = name; frame.hidden = !name; frame.src = name ? `/p/${encodeURIComponent(token)}/${encodeURIComponent(name)}/` : "about:blank";
+function showPage(name, path) { // path = the short-lived /p/<capability>/<name>/ link the server minted in /api/pages (never the long-lived token)
+  activePage = name; frame.hidden = !name; frame.src = name ? path : "about:blank";
   $("modebtn").hidden = !name; setMode(false); rebase(); present();
 }
 $("modebtn").onclick = () => setMode(!useMode);
@@ -285,9 +285,9 @@ $("pagesbtn").onclick = async () => {
   let pages = [];
   try { const r = await fetch("/api/pages", { headers: { "X-Token": token } }); pages = r.ok ? (await r.json()).pages : []; } catch (_) { /* offline: just the blank option */ }
   pop.innerHTML = "";
-  for (const [name, title] of [["", "Blank paper"], ...pages.map(q => [q.name, q.title])]) {
+  for (const [name, title, path] of [["", "Blank paper", ""], ...pages.map(q => [q.name, q.title, q.path])]) {
     const b = document.createElement("button"); b.textContent = title; b.classList.toggle("on", name === activePage);
-    b.onclick = () => { pop.hidden = true; showPage(name); }; pop.appendChild(b);
+    b.onclick = () => { pop.hidden = true; showPage(name, path); }; pop.appendChild(b);
   }
   if (!pages.length) { const n = document.createElement("div"); n.style.cssText = "padding:4px 8px;opacity:.7;font-size:13px"; n.textContent = "No pages yet. Ask Claude to put one here."; pop.appendChild(n); }
   const r = $("pagesbtn").getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = r.left + "px"; pop.hidden = false;

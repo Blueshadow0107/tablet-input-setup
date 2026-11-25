@@ -36,7 +36,17 @@ PAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 VIEWPORT = re.compile(r"^\d{2,5}x\d{2,5}$")
 # Pages are plain files written by Claude into <sketch dir>/pages/<name>/ (index.html + assets). They run in a sandboxed iframe with NO same-origin
 # access (CSP sandbox + the iframe's own sandbox attribute), so a page can run scripts but cannot read the token or call the sketchpad API.
-PAGE_CSP = "sandbox allow-scripts"
+# A page can only load its own files (+ data:/blob:), cannot fetch/XHR/WebSocket anywhere, cannot post forms or change <base>: even a page that
+# includes untrusted code has nowhere to send what it can see.
+PAGE_CSP = ("sandbox allow-scripts; default-src 'self' data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'none'; form-action 'none'; base-uri 'none'")
+CAP_TTL = 12 * 3600  # a page capability lives this long (seconds)
+
+
+def page_cap(token: str, name: str, expiry: int) -> str:
+    """Short-lived, read-only capability for ONE page: HMAC(token, page name + expiry). It is accepted only by the /p/ file route, never by /api/*,
+    so the long-lived token never appears in a page URL (page scripts can read their own URL)."""
+    mac = hmac.new(token.encode(), f"page:{name}:{expiry}".encode(), "sha256").hexdigest()[:32]
+    return f"{expiry}.{mac}"
 
 
 def load_token() -> str:
@@ -100,14 +110,15 @@ class Listeners:
             print(f"sketchpad on http://{host}:{self.port}/?t=<token>  ->  {Handler.out_dir}", file=sys.stderr, flush=True)
 
 
-def list_pages(pages_dir: Path) -> list[dict]:
+def list_pages(pages_dir: Path, token: str = "") -> list[dict]:
     out = []
     if pages_dir.is_dir():
         for d in sorted(pages_dir.iterdir()):
             idx = d / "index.html"
             if d.is_dir() and PAGE_NAME.match(d.name) and idx.is_file():
                 m = re.search(r"<title>(.*?)</title>", idx.read_text(errors="replace")[:4000], re.I | re.S)
-                out.append({"name": d.name, "title": (m.group(1).strip() if m else d.name)[:80]})
+                out.append({"name": d.name, "title": (m.group(1).strip() if m else d.name)[:80],
+                            "path": f"/p/{page_cap(token, d.name, int(time.time()) + CAP_TTL)}/{d.name}/"})
     return out
 
 
@@ -137,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:  # keep the token out of logs, keep the status
         line = re.sub(r"([?&]t=)[^ &\"]*", r"\1<token>", fmt % args)
-        line = re.sub(r"(/p/)[^/ \"]+", r"\1<token>", line)  # page URLs carry the token in the path
+        line = re.sub(r"(/p/)[^/ \"]+", r"\1<cap>", line)  # page URLs carry a short-lived capability in the path
         sys.stderr.write("%s %s\n" % (self.address_string(), line))
 
     def _authed(self) -> bool:
@@ -162,15 +173,18 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/favicon.ico":  # browsers ask without the token; nothing to leak
             return self._send(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
-        m = re.match(r"^/p/([^/]+)/([A-Za-z0-9_.-]+)/(.*)$", path)
-        if m:  # /p/<token>/<page>/<file>: the token is in the path so a page's relative links (css, js, images) keep working
-            if not hmac.compare_digest(unquote(m.group(1)).encode(), self.token.encode()):
-                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
-            return self._serve_page(m.group(2), unquote(m.group(3)))
+        m = re.match(r"^/p/(\d{1,12})\.([0-9a-f]{32})/([A-Za-z0-9_.-]+)/(.*)$", path)
+        if m:  # /p/<expiry>.<mac>/<page>/<file>: the capability is in the path so a page's relative links (css, js, images) keep working
+            exp, name = int(m.group(1)), m.group(3)
+            if exp < time.time() or not hmac.compare_digest(page_cap(self.token, name, exp).encode(), f"{m.group(1)}.{m.group(2)}".encode()):
+                return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad or expired page link"})
+            return self._serve_page(name, unquote(m.group(4)))
+        if path.startswith("/p/"):  # anything else under /p/ (e.g. the old token-in-path form) is refused
+            return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad or expired page link"})
         if not self._authed():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
         if path == "/api/pages":
-            return self._json(HTTPStatus.OK, {"pages": list_pages(self.out_dir / "pages")})
+            return self._json(HTTPStatus.OK, {"pages": list_pages(self.out_dir / "pages", self.token)})
         if path == "/":
             tok = (parse_qs(urlparse(self.path).query).get("t") or [""])[0] or self.headers.get("X-Token", "")
             page = (HERE / "index.html").read_bytes().replace(b"__TOKEN__", re.sub(r"[^A-Za-z0-9_-]", "", tok).encode())  # the manifest/icon links carry the same token
@@ -195,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
             ctype += "; charset=utf-8"
-        self._send(HTTPStatus.OK, target.read_bytes(), ctype, {"Content-Security-Policy": PAGE_CSP, "X-Content-Type-Options": "nosniff"})
+        self._send(HTTPStatus.OK, target.read_bytes(), ctype, {"Content-Security-Policy": PAGE_CSP, "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
 
     def do_POST(self) -> None:
         if not self._authed():
