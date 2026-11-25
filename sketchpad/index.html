@@ -39,6 +39,9 @@
   #app.right #shapes, #app.right #sizepop { left: auto; right: calc(100% + 6px); }
   #sizepop { padding: 12px 14px; } #sizepop input { width: 150px; display: block; }
   #app.right #collapse svg { transform: scaleX(-1); }
+  #selbar { position: absolute; z-index: 3; display: flex; gap: 2px; padding: 4px; background: var(--bar); border: 1px solid var(--edge); border-radius: 14px; box-shadow: 0 6px 20px #0009; }
+  #selbar button { width: 42px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; }
+  #selbar svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   #reopen { position: absolute; top: 50%; transform: translateY(-50%); z-index: 3; left: 0; width: 24px; height: 72px; min-height: 0; padding: 0;
     display: grid; place-items: center; border-radius: 0 12px 12px 0; }
   #reopen svg { transform: scaleX(-1); }
@@ -93,6 +96,7 @@
       <div class="grp" id="actions">
         <button id="undo" title="Undo"></button>
         <button id="redo" title="Redo"></button>
+        <button id="paste" title="Paste (copy or cut a selection first)"></button>
         <button id="clear" title="Clear (Undo brings it back)"></button>
         <button id="del" class="danger" title="Delete selection" hidden></button>
         <button id="finger" title="Finger drawing: off (off = pen only, palm ignored)"></button>
@@ -100,7 +104,10 @@
       <div class="spacer"></div>
       <div class="grp row2"><button id="flip" title="Move the panel to the other side"></button><button id="collapse" title="Hide the panel"></button></div>
     </aside>
-  <div id="wrap"><canvas id="c"></canvas></div>
+  <div id="wrap"><canvas id="c"></canvas>
+    <div id="selbar" hidden>
+      <button id="selcut" title="Cut"></button><button id="selcopy" title="Copy"></button><button id="selpaste" title="Paste"></button><button id="seldel" class="danger" title="Delete"></button>
+    </div></div>
     <button id="reopen" title="Show the panel"></button>
   </div>
 </div>
@@ -117,6 +124,7 @@
 const COLORS = ["#16121f", "#d12e4f", "#1f6feb", "#1a9b5b", "#e0881a", "#7c3aed"];
 const TOOLS = [["pen", "Pen"], ["shapes", "Shapes"], ["fill", "Fill"], ["eraser", "Eraser"], ["select", "Select"]];
 const FILL_TOL = 150;          // bucket fill: how far (sum of R+G+B differences) a pixel may be from the one tapped and still be filled; high enough to swallow the anti-aliased halo of a line
+const PASTE_OFFSET = 24;       // each paste lands this many px down-right of the last one, so copies don't hide the original
 const PEN_LIFT_GUARD_MS = 150; // no side-button toggle this soon after the pen last touched (a lifting tip reports buttons=1 with tiny pressure)
 const TOGGLE_DELAY_MS = 90;    // the toggle waits this long and is cancelled if the pen lands: light contact looks like a button press until the pointerdown arrives
 const SHAPES = [["line", "Line"], ["arrow", "Arrow"], ["rect", "Rect"], ["ellipse", "Ellipse"]];
@@ -135,6 +143,9 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   undo: SVG('<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/>'), redo: SVG('<path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 000 12h3"/>'),
   clear: SVG('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'), del: SVG('<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>'),
   finger: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
+  cut: SVG('<circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8 7.6L20 18M8 16.4L20 6"/>'),
+  copy: SVG('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>'),
+  paste: SVG('<rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V4a1 1 0 011-1h4a1 1 0 011 1v1M9.5 12h5M9.5 16h3.5"/>'),
   flip: SVG('<path d="M7 8h12l-3-3M17 16H5l3 3"/>'), collapse: SVG('<path d="M15 5l-7 7 7 7"/>'), reopen: SVG('<path d="M15 5l-7 7 7 7"/>'),
 };
 const MAX_EXPORT = 2000;       // longest side of the sent PNG
@@ -152,6 +163,7 @@ const wrap = document.getElementById("wrap"), cv = document.getElementById("c"),
 const base = document.createElement("canvas"), bctx = base.getContext("2d"); // committed objects, redrawn only when they change
 const $ = id => document.getElementById(id);
 let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
+let clip = [], pasteN = 0; // clipboard: deep copies of the objects last copied/cut
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
 // S Pen side button = TAP TO TOGGLE Pen <-> Eraser. On Samsung + Chrome the only reliable signals are: a hover move with buttons=1 and ~0 pressure (button
 // pressed in the air), and a contextmenu in the middle of a stroke. Holding the button while touching is useless: Chromium's stylus text selector swallows
@@ -228,7 +240,8 @@ document.addEventListener("pointerdown", e => { if (!$("pick").hidden && !$("pic
 function makeRow(el, list, onPick) {
   list.forEach(([key, label]) => { const b = document.createElement("button"); b.innerHTML = ICON[key] || label; b.title = label; b.setAttribute("aria-label", label); b.dataset.k = key; b.onclick = () => onPick(key); el.appendChild(b); });
 }
-for (const id of ["undo", "redo", "clear", "del", "finger", "flip", "collapse", "reopen"]) $(id).innerHTML = ICON[id];
+for (const id of ["undo", "redo", "paste", "clear", "del", "finger", "flip", "collapse", "reopen"]) $(id).innerHTML = ICON[id];
+for (const [id, k] of [["selcut", "cut"], ["selcopy", "copy"], ["selpaste", "paste"], ["seldel", "del"]]) $(id).innerHTML = ICON[k];
 makeRow($("tools"), TOOLS, k => setTool(k));
 makeRow($("shapes"), SHAPES, k => { shapeKind = k; updateUI(); });
 $("tools").querySelector('[data-k="eraser"]').title = "The S Pen side button (or its eraser end) also erases while held";
@@ -239,11 +252,33 @@ function updateUI() {
   $("shapes").hidden = tool !== "shapes";
   if (tool === "shapes") $("shapes").style.top = $("tools").querySelector('[data-k="shapes"]').offsetTop + "px"; // flyout lines up with the Shapes button
   $("del").hidden = !sel.size;
-  $("undo").disabled = !undoStack.length; $("redo").disabled = !redoStack.length;
+  $("undo").disabled = !undoStack.length; $("redo").disabled = !redoStack.length; $("paste").disabled = !clip.length;
 }
 $("undo").onclick = () => undo(); $("redo").onclick = () => redo();
 $("clear").onclick = () => { if (objects.length) { commit([]); toast("Cleared (Undo brings it back)"); } };
 $("del").onclick = deleteSel;
+// ---- cut / copy / paste of the selected objects (fills are not selectable, so they are not copied) ----
+const cloneObj = (o, d) => ({ ...mapObj(o, q => ({ x: q.x + d, y: q.y + d })), id: nextId++ });
+function copySel() { if (!sel.size) return; clip = selObjs().map(o => structuredClone(o)); pasteN = 0; updateUI(); present(); toast("Copied " + clip.length); }
+function cutSel() { if (!sel.size) return; copySel(); deleteSel(); toast("Cut " + clip.length + " (Undo brings it back)"); }
+function pasteClip() {
+  if (!clip.length) return;
+  pasteN++;
+  const add = clip.map(o => cloneObj(o, PASTE_OFFSET * pasteN));
+  commit([...objects, ...add]);
+  setTool("select"); sel.clear(); add.forEach(o => sel.add(o.id)); updateUI(); present(); // the copies are selected: drag them straight away
+}
+$("selcut").onclick = cutSel; $("selcopy").onclick = copySel; $("selpaste").onclick = pasteClip; $("seldel").onclick = deleteSel; $("paste").onclick = pasteClip;
+function placeSelBar(bb) { // the floating Cut/Copy/Paste/Delete bar sits above the selection (below it if there is no room), hidden while dragging
+  const bar = $("selbar");
+  if (!bb || cur) { bar.hidden = true; return; }
+  $("selpaste").hidden = !clip.length;
+  bar.hidden = false;
+  const w = bar.offsetWidth, h = bar.offsetHeight, W = wrap.clientWidth, H = wrap.clientHeight;
+  let x = (bb.x0 + bb.x1) / 2 - w / 2, y = bb.y0 - h - 14;
+  if (y < 6) y = bb.y1 + 14;
+  bar.style.left = Math.max(6, Math.min(W - w - 6, x)) + "px"; bar.style.top = Math.max(6, Math.min(H - h - 6, y)) + "px";
+}
 $("finger").onclick = () => { fingerOK = !fingerOK; $("finger").title = "Finger drawing: " + (fingerOK ? "on" : "off") + " (off = pen only, palm ignored)"; $("finger").classList.toggle("on", fingerOK); };
 // panel side + collapsed state are remembered on the device
 const UI_KEY = "sketchpad.ui", ui = { side: "left", collapsed: false };
@@ -264,6 +299,9 @@ addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT") return;
   if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if ((e.ctrlKey || e.metaKey) && e.key === "y") { e.preventDefault(); redo(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key === "c") { e.preventDefault(); copySel(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key === "x") { e.preventDefault(); cutSel(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key === "v") { e.preventDefault(); pasteClip(); }
   else if (e.key === "Delete" || e.key === "Backspace") deleteSel();
 });
 
@@ -391,14 +429,17 @@ function present() {
     else if (cur.mode === "lasso") { ctx.strokeStyle = ACCENT; ctx.fillStyle = "rgba(124,58,237,.08)"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.beginPath(); cur.pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.fill(); ctx.stroke(); }
     else if (f) for (const o of selObjs()) drawObj(ctx, mapObj(o, f));
   }
+  let selBB = null;
   if (sel.size && !(cur && cur.mode === "lasso")) { // selection box + handles
     const bb = bboxOf(selObjs(), f);
+    selBB = bb;
     if (bb) {
       ctx.setLineDash([6, 4]); ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5; ctx.strokeRect(bb.x0, bb.y0, bb.x1 - bb.x0, bb.y1 - bb.y0); ctx.setLineDash([]);
       for (const [hx, hy] of corners(bb)) { ctx.beginPath(); ctx.arc(hx, hy, 8, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill(); ctx.stroke(); }
     }
   }
   ctx.restore();
+  placeSelBar(selBB);
 }
 const corners = bb => [[bb.x0, bb.y0], [bb.x1, bb.y0], [bb.x1, bb.y1], [bb.x0, bb.y1]];
 function fit() {
