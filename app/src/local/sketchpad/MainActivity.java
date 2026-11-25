@@ -26,6 +26,7 @@ public class MainActivity extends Activity {
     private static final String TAG = "sketchpad";
     private WebView web;
     private int lastButtons = -1;
+    private boolean held = false, nativeDriven = false;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -89,13 +90,31 @@ public class MainActivity extends Activity {
         if (hasFocus) hideBars();
     }
 
-    // Raw pen events, before the web engine: log only when the button state changes
+    private void js(String code) {
+        if (web != null) web.evaluateJavascript(code, null);
+    }
+
+    // Raw pen events, before the web engine. Chromium hides touches made while the S Pen button is held, so the app tells the page itself:
+    // window.__penBtn(down) on every button change, and window.__penXY(x, y, phase) for a stroke that started with the button held.
     private void logPen(MotionEvent e) {
-        if (e.getPointerCount() > 0 && e.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
-            int bs = e.getButtonState();
-            if (bs != lastButtons) {
-                lastButtons = bs;
-                Log.d(TAG, "pen action=" + MotionEvent.actionToString(e.getActionMasked()) + " buttons=" + bs + " pressure=" + e.getPressure());
+        if (e.getPointerCount() == 0 || e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return;
+        int bs = e.getButtonState(), a = e.getActionMasked();
+        if (bs != lastButtons) {
+            lastButtons = bs;
+            Log.d(TAG, "pen action=" + MotionEvent.actionToString(a) + " buttons=" + bs + " pressure=" + e.getPressure());
+        }
+        boolean h = (bs & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
+        if (a == MotionEvent.ACTION_HOVER_EXIT) h = false;
+        if (h != held) {
+            held = h;
+            js("window.__penBtn&&window.__penBtn(" + h + ")");
+        }
+        if (a == MotionEvent.ACTION_DOWN) nativeDriven = held;
+        if (nativeDriven) {
+            int phase = a == MotionEvent.ACTION_DOWN ? 0 : (a == MotionEvent.ACTION_MOVE ? 1 : (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL ? 2 : -1));
+            if (phase >= 0) {
+                js("window.__penXY&&window.__penXY(" + e.getX() + "," + e.getY() + "," + phase + ")");
+                if (phase == 2) nativeDriven = false;
             }
         }
     }

@@ -86,6 +86,7 @@
 const COLORS = ["#16121f", "#d12e4f", "#1f6feb", "#1a9b5b", "#e0881a", "#7c3aed"];
 const TOOLS = [["pen", "Pen"], ["shapes", "Shapes"], ["fill", "Fill"], ["eraser", "Eraser"], ["select", "Select"]];
 const FILL_TOL = 150;          // bucket fill: how far (sum of R+G+B differences) a pixel may be from the one tapped and still be filled; high enough to swallow the anti-aliased halo of a line
+const TAP_BUTTON_MS = 400;     // wrapper app: a button press shorter than this, without the tip touching, is a TAP (toggle); longer or with touching = HOLD (erase while held)
 const PEN_LIFT_GUARD_MS = 150; // no side-button toggle this soon after the pen last touched (a lifting tip reports buttons=1 with tiny pressure)
 const TOGGLE_DELAY_MS = 90;    // the toggle waits this long and is cancelled if the pen lands: light contact looks like a button press until the pointerdown arrives
 const SHAPES = [["line", "Line"], ["arrow", "Arrow"], ["rect", "Rect"], ["ellipse", "Ellipse"]];
@@ -370,6 +371,27 @@ function togglePenTool() { // the S Pen button tap
 }
 const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
 
+// ---- native S Pen button (wrapper app only). The app calls window.__penBtn(down) when the side button changes, and window.__penXY(px, py, phase)
+// (0 down, 1 move, 2 up) for a stroke that STARTED with the button held (Chromium hides those touches from the page). Hover-based tap detection is then switched off.
+let nativePen = false, nativeHeld = false, heldAt = 0, heldContact = false, heldLatch = false;
+window.__penBtn = down => {
+  nativePen = true; clearTimeout(toggleT); toggleT = 0;
+  if (down) {
+    nativeHeld = true; heldAt = performance.now(); heldContact = false; heldLatch = false;
+    if (cur && cur.mode === "pen") { heldContact = true; heldLatch = true; ignoreHeld = true; switchPenToErase(); } // pressed mid-stroke: keep the ink, erase the rest
+  } else if (nativeHeld) {
+    nativeHeld = false;
+    if (!heldContact && performance.now() - heldAt < TAP_BUTTON_MS) togglePenTool();   // quick press in the air = toggle
+    else if (heldLatch) setTool(prevTool);                                              // hold ended: back to the tool you had
+  }
+};
+window.__penXY = (px, py, phase) => {
+  const k = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+  const e = { pointerId: -77, pointerType: "pen", button: 0, buttons: phase === 2 ? 0 : 32, pressure: 0.5, clientX: px / k + r.left, clientY: py / k + r.top };
+  if (phase === 0) { heldContact = true; if (!cur) startStroke(e); }                    // buttons&32 -> eraser
+  else if (cur && cur.pid === -77) { if (phase === 1) onMove(e); else onUp(e); }
+};
+
 function startStroke(e) {
   const p = pt(e), t = isPenErase(e) ? "eraser" : tool, size = +$("size").value;
   try { cv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capturable pointer */ }
@@ -417,7 +439,8 @@ function trySnap() {
 }
 function cancelCur() { clearTimeout(holdT); cur = null; hidden.clear(); rebase(); present(); }
 
-function trackPenButton(e) { // hover moves only: a rising edge of the side button (buttons=1, tip not pressing, no stroke in progress) toggles Pen/Eraser once
+function trackPenButton(e) {
+  if (nativePen) return; // the app reports the button natively // hover moves only: a rising edge of the side button (buttons=1, tip not pressing, no stroke in progress) toggles Pen/Eraser once
   if (!e.buttons) { airBtn = false; ignoreHeld = false; if (!cur && !penTouching(e)) penArmed = true; return; }
   if (e.buttons !== 1 || cur || penTouching(e) || airBtn || !penArmed || performance.now() - lastPenUp < PEN_LIFT_GUARD_MS) return;
   airBtn = true; penArmed = false;
