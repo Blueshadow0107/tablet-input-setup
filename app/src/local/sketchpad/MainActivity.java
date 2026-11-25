@@ -69,6 +69,7 @@ public class MainActivity extends Activity {
             s.setSupportZoom(false);
             s.setBuiltInZoomControls(false);
             s.setTextZoom(100);
+            s.setUserAgentString(s.getUserAgentString() + " SketchpadApp/1"); // the page uses this to know the app reports the S Pen button natively
             s.setMediaPlaybackRequiresUserGesture(true);
             setContentView(web);
         }
