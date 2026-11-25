@@ -13,7 +13,7 @@ Run `sketch latest` (or read `~/tablet-sketches/latest.png` and `latest.txt` dir
 
 ## Rules for changes
 
-- The server must always require the token, and must never log it. Default bind is the Tailscale address; `--lan` is opt-in.
+- The server must always require the token, and must never log it. Bind per address, never 0.0.0.0 by default: Tailscale's address always, the Wi-Fi address only with `--also-lan` (what `sketch start` saves by default, by the user's choice; plain HTTP, so `--tailscale-only` on shared Wi-Fi). The token is stable (bookmarked on the tab); `sketch rotate` replaces it.
 - Keep it stdlib-only and a single small HTML page: the tablet has 4 GB RAM.
 - Wayland session: use `wtype`/`grim`/`wl-copy`, not `xdotool`.
 - UI: no page scroll, toasts clear themselves, colours/sizes come from the constants at the top of the script.

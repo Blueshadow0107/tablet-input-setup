@@ -2,7 +2,9 @@
 """Sketchpad server: tablet draws, laptop saves a PNG (+ caption) for Claude to read.
 
 Stdlib only. Every request needs the secret token. By default it listens on the
-Tailscale address only; --lan opens it on all interfaces (token still required).
+Tailscale address only; --also-lan adds the Wi-Fi/LAN address (plain HTTP). Addresses
+are bound one by one (never 0.0.0.0 unless --lan) and re-checked every few seconds, so
+Tailscale coming up later, or the Wi-Fi address changing, just works.
 """
 from __future__ import annotations
 
@@ -12,8 +14,10 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
+import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +52,46 @@ def tailscale_ip() -> str | None:
         return None
     ip = out.stdout.strip().splitlines()[0] if out.returncode == 0 and out.stdout.strip() else ""
     return ip or None
+
+
+def lan_ip() -> str | None:
+    """The address of the default route (Wi-Fi/Ethernet). No packet is sent; Tailscale's own range is skipped."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.connect(("10.255.255.255", 1))
+            ip = sk.getsockname()[0]
+    except OSError:
+        return None
+    a = ip.split(".")
+    if ip.startswith("127.") or (a[0] == "100" and 64 <= int(a[1]) <= 127):
+        return None
+    return ip
+
+
+class Listeners:
+    """One ThreadingHTTPServer per wanted address; sync() opens new ones and closes ones no longer wanted."""
+
+    def __init__(self, port: int) -> None:
+        self.port, self.servers, self.failed = port, {}, set()
+
+    def sync(self, wanted: set[str]) -> None:
+        for host in [h for h in self.servers if h not in wanted]:
+            srv = self.servers.pop(host)
+            srv.shutdown()
+            srv.server_close()
+            print(f"sketchpad: stopped listening on {host}", file=sys.stderr, flush=True)
+        for host in sorted(wanted - set(self.servers)):
+            try:
+                srv = ThreadingHTTPServer((host, self.port), Handler)
+            except OSError as e:  # e.g. Tailscale is off: its address is known but not assigned yet. Say so once, keep retrying quietly
+                if host not in self.failed:
+                    self.failed.add(host)
+                    print(f"sketchpad: cannot listen on {host}:{self.port} yet ({e.strerror}); will keep retrying", file=sys.stderr, flush=True)
+                continue
+            self.failed.discard(host)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.servers[host] = srv
+            print(f"sketchpad on http://{host}:{self.port}/?t=<token>  ->  {Handler.out_dir}", file=sys.stderr, flush=True)
 
 
 def save_sketch(out_dir: Path, png: bytes, caption: str) -> str:
@@ -137,29 +181,36 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--lan", action="store_true", help="listen on all interfaces (token still required)")
-    ap.add_argument("--host", help="explicit bind address (overrides Tailscale/--lan)")
+    ap.add_argument("--lan", action="store_true", help="listen on ALL interfaces (token still required)")
+    ap.add_argument("--also-lan", action="store_true", help="also listen on the Wi-Fi/LAN address (plain HTTP), in addition to Tailscale")
+    ap.add_argument("--host", help="explicit bind address(es), comma separated (overrides everything else)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--dir", type=Path, default=DEFAULT_DIR, help="where sketches are saved")
     args = ap.parse_args()
 
-    if args.host:
-        host = args.host
-    elif args.lan:
-        host = "0.0.0.0"
-    else:
-        host = tailscale_ip()
-        if not host:
-            print("Tailscale has no IPv4 address (is it running? `/ts on` over Telegram).\n"
-                  "Use --lan for the Wi-Fi address instead.", file=sys.stderr)
-            return 2
-
     Handler.token = load_token()
     Handler.out_dir = args.dir.expanduser()
-    httpd = ThreadingHTTPServer((host, args.port), Handler)
-    print(f"sketchpad on http://{host}:{args.port}/?t=<token>  ->  {Handler.out_dir}", file=sys.stderr, flush=True)
+
+    def wanted() -> set[str]:
+        if args.host:
+            return {h.strip() for h in args.host.split(",") if h.strip()}
+        if args.lan:
+            return {"0.0.0.0"}
+        out = {tailscale_ip()}
+        if args.also_lan:
+            out.add(lan_ip())
+        return {h for h in out if h}
+
+    listeners = Listeners(args.port)
+    waiting = False
     try:
-        httpd.serve_forever()
+        while True:
+            want = wanted()
+            listeners.sync(want)
+            if not want and not waiting:
+                print("sketchpad: no Tailscale/LAN address yet, waiting (Tailscale off? `/ts on` over Telegram)", file=sys.stderr, flush=True)
+            waiting = not want
+            time.sleep(8)
     except KeyboardInterrupt:
         pass
     return 0

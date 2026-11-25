@@ -12,9 +12,10 @@ Two separate things live here. **Sketchpad is built and tested.** The Weylus and
 Draw on the tablet in its browser, hit Send, and a PNG (plus an optional caption) lands on the laptop where Claude can read it. No app on the tablet, and it's light on its 4 GB of RAM.
 
 ```bash
-sketch start          # serve over Tailscale (default); prints the URL for the tab
-sketch start --lan    # serve on the Wi-Fi address instead (token still required)
-sketch url [--lan]    # print the URL again
+sketch start                    # serve on Tailscale AND the Wi-Fi address (default); prints a URL for each
+sketch start --tailscale-only   # no LAN listener (use on open/shared Wi-Fi)
+sketch url                      # print the URLs again
+sketch rotate                   # new token (old bookmarks die) and restart
 sketch latest         # path + caption of the newest sketch
 sketch stop
 ```
@@ -29,8 +30,8 @@ Then tell Claude "check my latest sketch". It reads `~/tablet-sketches/latest.pn
 - **Select.** Draw a lasso around things, drag inside the box to move them, drag a corner to resize, *Delete* to remove. Tapping outside clears the selection.
 - **Undo / redo.** Buttons, plus a two-finger tap (undo) and three-finger tap (redo). *Clear* is undoable. Moves, resizes, erases and deletes are each one undo step.
 - **Pen diagnostics.** Add `&debug=1` to the URL to show what the browser reports for the pen (type, button, buttons, pressure) and log changes on the laptop (`journalctl --user -u sketchpad | grep pen-debug`).
-- **Auth.** Every request needs a random token (`~/.config/sketchpad/token`, mode 600), regenerated on every `sketch start` so old links die. Over Tailscale the link is encrypted and nothing is exposed on the local Wi-Fi.
-- **`--lan` is plain HTTP.** It binds to the Wi-Fi address only, but on an open or shared network the token and your sketches can be sniffed. Use it for short sessions on a network you trust; otherwise use Tailscale.
+- **Auth.** Every request needs a random token (`~/.config/sketchpad/token`, mode 600), created once and kept, so the tab can bookmark the link. `sketch rotate` replaces it if it ever leaks. Over Tailscale the link is encrypted. The service panel's Sketchpad tile only starts/stops the unit and reuses what `sketch start` last saved.
+- **The LAN link is plain HTTP.** The server binds each address separately (Tailscale's, and the Wi-Fi one with `--also-lan`), never every interface, and re-checks every few seconds so Tailscale coming up later just works. On an open or shared network the token and sketches can be sniffed, and the token is now long-lived: use `--tailscale-only` there.
 - **Saved files.** `~/tablet-sketches/<timestamp>.png` + `.txt`, and `latest.png` / `latest.txt` symlinks.
 - **Not enabled at boot.** `sketchpad.service` starts only when you run `sketch start`.
 
