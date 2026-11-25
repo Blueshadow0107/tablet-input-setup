@@ -10,6 +10,7 @@ import argparse
 import hmac
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -73,8 +74,9 @@ class Handler(BaseHTTPRequestHandler):
     token: str = ""
     out_dir: Path = DEFAULT_DIR
 
-    def log_message(self, fmt: str, *args) -> None:  # keep the token out of logs
-        sys.stderr.write("%s %s\n" % (self.address_string(), (fmt % args).split("?")[0]))
+    def log_message(self, fmt: str, *args) -> None:  # keep the token out of logs, keep the status
+        line = re.sub(r"([?&]t=)[^ &\"]*", r"\1<token>", fmt % args)
+        sys.stderr.write("%s %s\n" % (self.address_string(), line))
 
     def _authed(self) -> bool:
         q = parse_qs(urlparse(self.path).query)
@@ -107,7 +109,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._authed():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
-        if urlparse(self.path).path != "/api/sketch":
+        route = urlparse(self.path).path
+        if route == "/api/debug":  # pen-event diagnostics from ?debug=1, logged JSON-escaped
+            try:
+                n = min(int(self.headers.get("Content-Length", "0")), 2048)
+            except ValueError:
+                n = 0
+            msg = self.rfile.read(n).decode("utf-8", "replace")
+            print("pen-debug " + json.dumps(msg), file=sys.stderr, flush=True)
+            return self._json(HTTPStatus.OK, {"ok": True})
+        if route != "/api/sketch":
             return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))

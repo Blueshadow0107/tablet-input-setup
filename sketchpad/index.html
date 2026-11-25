@@ -21,17 +21,21 @@
     border-radius: 8px; padding: 8px 12px; min-height: 40px; }
   button:active { background: #33225c; }
   button.on { border-color: var(--accent); background: #3a2a6e; }
+  button:disabled { opacity: .4; }
   button.send { background: var(--accent); color: #140a2a; border-color: var(--accent); font-weight: 700; }
+  button.danger { border-color: #7f3a52; }
   .sw { width: 34px; height: 34px; min-height: 0; padding: 0; border-radius: 50%; border: 2px solid var(--edge); }
   .sw.on { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
   input[type=range] { width: 96px; accent-color: var(--accent); }
   #cap { flex: 1 1 180px; min-width: 140px; }
+  [hidden] { display: none !important; }
   #wrap { position: relative; margin: 8px; border-radius: 10px; overflow: hidden; border: 1px solid var(--edge); background: var(--paper); }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
   #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); padding: 10px 16px; border-radius: 10px;
     background: var(--bar); border: 1px solid var(--edge); opacity: 0; pointer-events: none; transition: opacity .2s; }
   #toast.show { opacity: 1; }
   #toast.ok { border-color: var(--ok); } #toast.bad { border-color: var(--bad); }
+  #dbg { font: 12px monospace; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -39,109 +43,362 @@
   <div id="bar">
     <div class="grp" id="colors"></div>
     <div class="sep"></div>
-    <div class="grp">
-      <button id="pen" class="on">Pen</button>
-      <button id="eraser">Eraser</button>
-      <input id="size" type="range" min="1" max="24" value="4" aria-label="Brush size">
-    </div>
+    <div class="grp" id="tools"></div>
+    <div class="grp" id="shapes" hidden></div>
+    <input id="size" type="range" min="1" max="24" value="4" aria-label="Brush size">
     <div class="sep"></div>
     <div class="grp">
       <button id="undo">Undo</button>
+      <button id="redo">Redo</button>
       <button id="clear">Clear</button>
+      <button id="del" class="danger" hidden>Delete</button>
       <button id="finger" title="Allow finger drawing (off = pen only, palm ignored)">Finger: off</button>
     </div>
     <div class="sep"></div>
     <input id="cap" type="text" placeholder="Say what this is (optional)" autocomplete="off">
     <button id="send" class="send">Send</button>
+    <span id="dbg" hidden></span>
   </div>
   <div id="wrap"><canvas id="c"></canvas></div>
 </div>
 <div id="toast" role="status"></div>
 <script>
 "use strict";
+// ---- constants (everything tunable lives here) ----
 const COLORS = ["#16121f", "#d12e4f", "#1f6feb", "#1a9b5b", "#e0881a", "#7c3aed"];
-const PAPER = "#fbfaf6";
-const MAX_EXPORT = 2000;
-const token = new URLSearchParams(location.search).get("t") || "";
+const TOOLS = [["pen", "Pen"], ["shapes", "Shapes"], ["eraser", "Eraser"], ["select", "Select"]];
+const SHAPES = [["line", "Line"], ["arrow", "Arrow"], ["rect", "Rect"], ["ellipse", "Ellipse"]];
+const PAPER = "#fbfaf6", ACCENT = "#7c3aed";
+const MAX_EXPORT = 2000;       // longest side of the sent PNG
+const HOLD_MS = 550;           // hold the pen still this long to snap a stroke to a line
+const STRAIGHT_MAX_DEV = 0.12; // snap only if the stroke is this close to straight (fraction of its length)
+const HANDLE_R = 24;           // touch radius of the resize handles
+const UNDO_LIMIT = 200;
+const TAP_MS = 350, TAP_SLOP = 20; // multi-finger tap gestures
+const params = new URLSearchParams(location.search);
+const token = params.get("t") || "", DEBUG = params.get("debug") === "1";
 
+// ---- state ----
 const wrap = document.getElementById("wrap"), cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const base = document.createElement("canvas"), bctx = base.getContext("2d"); // committed objects, redrawn only when they change
 const $ = id => document.getElementById(id);
-let color = COLORS[0], erasing = false, fingerOK = false, strokes = [], cur = null;
+let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
+let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
+const dpr = () => window.devicePixelRatio || 1;
 
+// ---- toolbar ----
 COLORS.forEach((c, i) => {
   const b = document.createElement("button");
   b.className = "sw" + (i === 0 ? " on" : ""); b.style.background = c; b.setAttribute("aria-label", "colour " + c);
-  b.onclick = () => { color = c; setErase(false); document.querySelectorAll(".sw").forEach(s => s.classList.toggle("on", s === b)); };
+  b.onclick = () => { color = c; if (tool === "eraser" || tool === "select") setTool("pen"); document.querySelectorAll(".sw").forEach(s => s.classList.toggle("on", s === b)); };
   $("colors").appendChild(b);
 });
-
-function setErase(on) { erasing = on; $("pen").classList.toggle("on", !on); $("eraser").classList.toggle("on", on); }
-$("pen").onclick = () => setErase(false);
-$("eraser").onclick = () => setErase(true);
-$("finger").onclick = () => { fingerOK = !fingerOK; $("finger").textContent = "Finger: " + (fingerOK ? "on" : "off"); $("finger").classList.toggle("on", fingerOK); };
-$("undo").onclick = () => { strokes.pop(); redraw(); };
-$("clear").onclick = () => { if (strokes.length) { strokes = []; redraw(); toast("Cleared"); } };
-
-function fit() {
-  const r = wrap.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
-  redraw();
+function makeRow(el, list, onPick) {
+  list.forEach(([key, label]) => { const b = document.createElement("button"); b.textContent = label; b.dataset.k = key; b.onclick = () => onPick(key); el.appendChild(b); });
 }
-function seg(c, a, b, s) {
-  c.strokeStyle = s.erase ? PAPER : s.color; c.lineCap = c.lineJoin = "round";
-  c.lineWidth = s.size * (0.35 + 0.9 * (b.p || 0.5));
+makeRow($("tools"), TOOLS, k => setTool(k));
+makeRow($("shapes"), SHAPES, k => { shapeKind = k; updateUI(); });
+$("tools").querySelector('[data-k="eraser"]').title = "The S Pen side button (or its eraser end) also erases while held";
+function setTool(t) { tool = t; if (t !== "select") sel.clear(); updateUI(); present(); }
+function updateUI() {
+  document.querySelectorAll("#tools button").forEach(b => b.classList.toggle("on", b.dataset.k === tool));
+  document.querySelectorAll("#shapes button").forEach(b => b.classList.toggle("on", b.dataset.k === shapeKind));
+  $("shapes").hidden = tool !== "shapes";
+  $("del").hidden = !sel.size;
+  $("undo").disabled = !undoStack.length; $("redo").disabled = !redoStack.length;
+}
+$("undo").onclick = () => undo(); $("redo").onclick = () => redo();
+$("clear").onclick = () => { if (objects.length) { commit([]); toast("Cleared (Undo brings it back)"); } };
+$("del").onclick = deleteSel;
+$("finger").onclick = () => { fingerOK = !fingerOK; $("finger").textContent = "Finger: " + (fingerOK ? "on" : "off"); $("finger").classList.toggle("on", fingerOK); };
+addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+  else if ((e.ctrlKey || e.metaKey) && e.key === "y") { e.preventDefault(); redo(); }
+  else if (e.key === "Delete" || e.key === "Backspace") deleteSel();
+});
+
+// ---- geometry ----
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+function distSeg(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+function outline(o) {
+  if (o.type === "stroke") return o.pts;
+  const { a, b } = o;
+  if (o.kind === "line" || o.kind === "arrow") return [a, b];
+  if (o.kind === "rect") return [a, { x: b.x, y: a.y }, b, { x: a.x, y: b.y }, a];
+  const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, rx = Math.abs(b.x - a.x) / 2, ry = Math.abs(b.y - a.y) / 2, out = [];
+  for (let i = 0; i <= 48; i++) { const t = i / 48 * 2 * Math.PI; out.push({ x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) }); }
+  return out;
+}
+function hitObj(o, p, r) {
+  const P = outline(o), lim = r + o.size / 2;
+  if (P.length === 1) return dist(p, P[0]) <= lim;
+  for (let i = 1; i < P.length; i++) if (distSeg(p, P[i - 1], P[i]) <= lim) return true;
+  return false;
+}
+function samples(o) { // outline points, densified so long lines have interior samples
+  const P = outline(o), out = [P[0]];
+  for (let i = 1; i < P.length; i++) {
+    const n = Math.max(1, Math.ceil(dist(P[i - 1], P[i]) / 20));
+    for (let k = 1; k <= n; k++) out.push({ x: P[i - 1].x + (P[i].x - P[i - 1].x) * k / n, y: P[i - 1].y + (P[i].y - P[i - 1].y) * k / n });
+  }
+  return out;
+}
+function inPoly(p, poly) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    if ((poly[i].y > p.y) !== (poly[j].y > p.y) && p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x) c = !c;
+  }
+  return c;
+}
+function bboxOf(list, f) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const o of list) for (const q of samples(o)) {
+    const p = f ? f(q) : q, h = o.size / 2;
+    x0 = Math.min(x0, p.x - h); y0 = Math.min(y0, p.y - h); x1 = Math.max(x1, p.x + h); y1 = Math.max(y1, p.y + h);
+  }
+  return list.length ? { x0, y0, x1, y1 } : null;
+}
+function mapObj(o, f) {
+  return o.type === "stroke" ? { ...o, pts: o.pts.map(p => ({ ...f(p), p: p.p })) } : { ...o, a: f(o.a), b: f(o.b) };
+}
+const selObjs = () => objects.filter(o => sel.has(o.id));
+
+// ---- drawing ----
+function drawObj(c, o) {
+  c.strokeStyle = o.color; c.lineCap = c.lineJoin = "round";
+  if (o.type === "stroke") {
+    const P = o.pts;
+    if (P.length === 1) { c.lineWidth = o.size; c.beginPath(); c.moveTo(P[0].x, P[0].y); c.lineTo(P[0].x + 0.01, P[0].y); c.stroke(); }
+    for (let i = 1; i < P.length; i++) segPen(c, P[i - 1], P[i], o);
+    return;
+  }
+  c.lineWidth = o.size; c.beginPath();
+  const { a, b } = o;
+  if (o.kind === "line" || o.kind === "arrow") {
+    c.moveTo(a.x, a.y); c.lineTo(b.x, b.y);
+    if (o.kind === "arrow" && dist(a, b) > 1) {
+      const ang = Math.atan2(b.y - a.y, b.x - a.x), L = Math.max(12, o.size * 4);
+      for (const s of [-1, 1]) { c.moveTo(b.x, b.y); c.lineTo(b.x - L * Math.cos(ang + s * 0.45), b.y - L * Math.sin(ang + s * 0.45)); }
+    }
+  } else if (o.kind === "rect") c.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+  else c.ellipse((a.x + b.x) / 2, (a.y + b.y) / 2, Math.abs(b.x - a.x) / 2, Math.abs(b.y - a.y) / 2, 0, 0, 2 * Math.PI);
+  c.stroke();
+}
+function segPen(c, a, b, o) {
+  c.strokeStyle = o.color; c.lineCap = c.lineJoin = "round";
+  c.lineWidth = o.size * (0.35 + 0.9 * (b.p || 0.5));
   c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
 }
-function paint(c, scale) {
-  c.save(); c.scale(scale, scale);
-  for (const s of strokes) {
-    if (s.pts.length === 1) { const p = s.pts[0]; seg(c, p, { x: p.x + 0.01, y: p.y, p: p.p }, s); }
-    for (let i = 1; i < s.pts.length; i++) seg(c, s.pts[i - 1], s.pts[i], s);
+function rebase() {
+  base.width = cv.width; base.height = cv.height;
+  bctx.fillStyle = PAPER; bctx.fillRect(0, 0, base.width, base.height);
+  bctx.save(); bctx.scale(dpr(), dpr());
+  for (const o of objects) if (!hidden.has(o.id)) drawObj(bctx, o);
+  bctx.restore();
+}
+function xfFn() { // current drag transform for the selection, or null
+  if (!cur) return null;
+  if (cur.mode === "move") return p => ({ x: p.x + cur.dx, y: p.y + cur.dy });
+  if (cur.mode === "scale") return p => ({ x: cur.ox + (p.x - cur.ox) * cur.s, y: cur.oy + (p.y - cur.oy) * cur.s });
+  return null;
+}
+function present() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(base, 0, 0);
+  ctx.save(); ctx.scale(dpr(), dpr());
+  const f = xfFn();
+  if (cur) {
+    if (cur.mode === "pen") drawObj(ctx, { ...cur, type: "stroke", pts: cur.pts });
+    else if (cur.mode === "shape") drawObj(ctx, { ...cur, type: "shape" });
+    else if (cur.mode === "erase") { const q = cur.pts[cur.pts.length - 1]; ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.arc(q.x, q.y, cur.r, 0, 2 * Math.PI); ctx.stroke(); }
+    else if (cur.mode === "lasso") { ctx.strokeStyle = ACCENT; ctx.fillStyle = "rgba(124,58,237,.08)"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.beginPath(); cur.pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)); ctx.fill(); ctx.stroke(); }
+    else if (f) for (const o of selObjs()) drawObj(ctx, mapObj(o, f));
   }
-  c.restore();
-}
-function redraw() {
-  const dpr = window.devicePixelRatio || 1;
-  ctx.fillStyle = PAPER; ctx.fillRect(0, 0, cv.width, cv.height); paint(ctx, dpr);
-}
-
-function pt(e) {
-  const r = cv.getBoundingClientRect();
-  return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 };
-}
-cv.addEventListener("pointerdown", e => {
-  if (e.pointerType === "touch" && !fingerOK) return;
-  cv.setPointerCapture(e.pointerId);
-  const eraseNow = erasing || (e.buttons & 32) !== 0; // pen's eraser end
-  cur = { color, erase: eraseNow, size: +$("size").value * (eraseNow ? 3 : 1), pts: [pt(e)], id: e.pointerId };
-  strokes.push(cur); redraw();
-});
-cv.addEventListener("pointermove", e => {
-  if (!cur || e.pointerId !== cur.id) return;
-  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-  const dpr = window.devicePixelRatio || 1;
-  ctx.save(); ctx.scale(dpr, dpr);
-  for (const ev of (evs.length ? evs : [e])) {
-    const p = pt(ev), prev = cur.pts[cur.pts.length - 1];
-    cur.pts.push(p); seg(ctx, prev, p, cur);
+  if (sel.size && !(cur && cur.mode === "lasso")) { // selection box + handles
+    const bb = bboxOf(selObjs(), f);
+    if (bb) {
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.5; ctx.strokeRect(bb.x0, bb.y0, bb.x1 - bb.x0, bb.y1 - bb.y0); ctx.setLineDash([]);
+      for (const [hx, hy] of corners(bb)) { ctx.beginPath(); ctx.arc(hx, hy, 8, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill(); ctx.stroke(); }
+    }
   }
   ctx.restore();
-});
-const end = e => { if (cur && e.pointerId === cur.id) cur = null; };
-cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
-cv.addEventListener("contextmenu", e => e.preventDefault());
+}
+const corners = bb => [[bb.x0, bb.y0], [bb.x1, bb.y0], [bb.x1, bb.y1], [bb.x0, bb.y1]];
+function fit() {
+  const r = wrap.getBoundingClientRect(), d = dpr();
+  cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+  rebase(); present();
+}
 
+// ---- history ----
+function afterChange() {
+  const ids = new Set(objects.map(o => o.id));
+  for (const id of [...sel]) if (!ids.has(id)) sel.delete(id);
+  hidden.clear(); rebase(); present(); updateUI();
+}
+function commit(next) {
+  undoStack.push(objects); if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack = []; objects = next; afterChange();
+}
+function undo() { if (!undoStack.length) return toast("Nothing to undo", "bad"); redoStack.push(objects); objects = undoStack.pop(); afterChange(); }
+function redo() { if (!redoStack.length) return toast("Nothing to redo", "bad"); undoStack.push(objects); objects = redoStack.pop(); afterChange(); }
+function deleteSel() { if (!sel.size) return; commit(objects.filter(o => !sel.has(o.id))); sel.clear(); updateUI(); present(); }
+
+// ---- pointer input ----
+const isPenErase = e => e.pointerType === "pen" && (!!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // eraser end or side button
+const inContact = e => e.pointerType !== "pen" || e.pressure > 0 || !!(e.buttons & 1) || !!(e.buttons & 32);
+const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
+
+function startStroke(e) {
+  const p = pt(e), t = isPenErase(e) ? "eraser" : tool, size = +$("size").value;
+  try { cv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capturable pointer */ }
+  const b = { pid: e.pointerId, ptype: e.pointerType, color, size };
+  if (t === "pen") { cur = { ...b, mode: "pen", pts: [p] }; armHold(); }
+  else if (t === "shapes") cur = { ...b, mode: "shape", kind: shapeKind, a: p, b: p };
+  else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(10, size * 2.5) }; eraseAt(p); }
+  else selectDown(p, b);
+  present();
+}
+function selectDown(p, b) {
+  const bb = sel.size ? bboxOf(selObjs()) : null;
+  if (bb) {
+    for (const [i, [hx, hy]] of corners(bb).entries()) if (Math.hypot(p.x - hx, p.y - hy) <= HANDLE_R) {
+      const [ox, oy] = corners(bb)[(i + 2) % 4];
+      cur = { ...b, mode: "scale", ox, oy, hx, hy, s: 1 }; hidden = new Set(sel); rebase(); return;
+    }
+    if (p.x >= bb.x0 - 8 && p.x <= bb.x1 + 8 && p.y >= bb.y0 - 8 && p.y <= bb.y1 + 8) {
+      cur = { ...b, mode: "move", sx: p.x, sy: p.y, dx: 0, dy: 0 }; hidden = new Set(sel); rebase(); return;
+    }
+  }
+  sel.clear(); cur = { ...b, mode: "lasso", pts: [p] };
+}
+function eraseAt(p) {
+  let changed = false;
+  for (const o of objects) if (!hidden.has(o.id) && hitObj(o, p, cur.r)) { cur.hit.add(o.id); hidden.add(o.id); changed = true; }
+  if (changed) rebase();
+}
+function eraseSweep(a, b) { // test the whole path, not just where the pen landed, so a fast flick can't skip over a line
+  const n = Math.max(1, Math.ceil(dist(a, b) / (cur.r / 2)));
+  for (let k = 1; k <= n; k++) eraseAt({ x: a.x + (b.x - a.x) * k / n, y: a.y + (b.y - a.y) * k / n });
+}
+function armHold() { clearTimeout(holdT); holdT = setTimeout(trySnap, HOLD_MS); }
+function trySnap() {
+  if (!cur || cur.mode !== "pen" || cur.snapped || cur.pts.length < 4) return;
+  const a = cur.pts[0], b = cur.pts[cur.pts.length - 1], len = dist(a, b);
+  if (len < 30) return;
+  const dev = Math.max(...cur.pts.map(q => distSeg(q, a, b))) / len;
+  if (dev > STRAIGHT_MAX_DEV) return;
+  cur.snapped = true; cur.pts = [{ ...a, p: 0.5 }, { ...b, p: 0.5 }]; present();
+}
+function cancelCur() { clearTimeout(holdT); cur = null; hidden.clear(); rebase(); present(); }
+
+function onMove(e) {
+  if (e.pointerType === "touch") gMove(e);
+  dbg(e, "move");
+  if (!cur) { // pen pressed down while the side button was already held: the button press consumed the pointerdown
+    if (e.pointerType === "pen" && inContact(e) && e.buttons && !(e.pointerType === "touch")) startStroke(e);
+    return;
+  }
+  if (e.pointerId !== cur.pid) return;
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  for (const ev of (evs.length ? evs : [e])) step(pt(ev));
+}
+function step(p) {
+  switch (cur.mode) {
+    case "pen":
+      if (cur.snapped) { cur.pts[1] = { ...p, p: 0.5 }; present(); break; }
+      { const prev = cur.pts[cur.pts.length - 1]; cur.pts.push(p);
+        ctx.save(); ctx.scale(dpr(), dpr()); segPen(ctx, prev, p, cur); ctx.restore();
+        if (dist(prev, p) > 4) armHold(); }
+      break;
+    case "shape": cur.b = p; present(); break;
+    case "erase": { const prev = cur.pts[cur.pts.length - 1]; cur.pts.push(p); eraseSweep(prev, p); present(); break; }
+    case "lasso": cur.pts.push(p); present(); break;
+    case "move": cur.dx = p.x - cur.sx; cur.dy = p.y - cur.sy; present(); break;
+    case "scale": {
+      const sx = (p.x - cur.ox) / (cur.hx - cur.ox), sy = (p.y - cur.oy) / (cur.hy - cur.oy);
+      cur.s = Math.max(0.1, Math.max(sx, sy)); present(); break; }
+  }
+}
+function onUp(e) {
+  if (e.pointerType === "touch") gUp(e);
+  dbg(e, "up");
+  if (!cur || e.pointerId !== cur.pid) return;
+  clearTimeout(holdT);
+  const c = cur; cur = null;
+  switch (c.mode) {
+    case "pen":
+      if (c.snapped) commit([...objects, { id: nextId++, type: "shape", kind: "line", color: c.color, size: c.size, a: c.pts[0], b: c.pts[1] }]);
+      else commit([...objects, { id: nextId++, type: "stroke", color: c.color, size: c.size, pts: c.pts }]);
+      break;
+    case "shape":
+      if (dist(c.a, c.b) < 3) { present(); break; }
+      commit([...objects, { id: nextId++, type: "shape", kind: c.kind, color: c.color, size: c.size, a: c.a, b: c.b }]); break;
+    case "erase":
+      if (c.hit.size) commit(objects.filter(o => !c.hit.has(o.id))); else { hidden.clear(); present(); } break;
+    case "lasso": {
+      let area = 0; for (let i = 0; i < c.pts.length; i++) { const q = c.pts[(i + 1) % c.pts.length]; area += c.pts[i].x * q.y - q.x * c.pts[i].y; }
+      if (c.pts.length >= 3 && Math.abs(area / 2) > 400) {
+        for (const o of objects) { const S = samples(o); if (S.filter(q => inPoly(q, c.pts)).length >= S.length / 2) sel.add(o.id); }
+      }
+      updateUI(); present(); break; }
+    case "move": case "scale": {
+      const f = c.mode === "move" ? (p => ({ x: p.x + c.dx, y: p.y + c.dy })) : (p => ({ x: c.ox + (p.x - c.ox) * c.s, y: c.oy + (p.y - c.oy) * c.s }));
+      const moved = c.mode === "move" ? Math.hypot(c.dx, c.dy) > 2 : Math.abs(c.s - 1) > 0.01;
+      if (moved) commit(objects.map(o => sel.has(o.id) ? mapObj(o, f) : o)); else { hidden.clear(); rebase(); present(); }
+      break; }
+  }
+}
+cv.addEventListener("pointerdown", e => {
+  dbg(e, "down");
+  if (e.pointerType === "touch") {
+    gDown(e);
+    if (touches.size >= 2 && cur && cur.ptype === "touch") cancelCur(); // second finger: it's a gesture, not a stroke
+    if (!fingerOK || touches.size >= 2) return;
+  }
+  if (cur || !inContact(e)) return; // button pressed in the air: wait for the tip to touch
+  startStroke(e);
+});
+cv.addEventListener("pointermove", onMove);
+cv.addEventListener("pointerup", onUp);
+cv.addEventListener("pointercancel", e => { dbg(e, "cancel"); if (cur && e.pointerId === cur.pid) cancelCur(); if (e.pointerType === "touch") touches.delete(e.pointerId); });
+cv.addEventListener("contextmenu", e => { e.preventDefault(); dbg(e, "ctxmenu"); });
+
+// ---- multi-finger tap gestures: 2 fingers = undo, 3 = redo ----
+const touches = new Map(); let gMax = 0, gStart = 0, gMoved = false;
+function gDown(e) { if (!touches.size) { gStart = performance.now(); gMax = 0; gMoved = false; } touches.set(e.pointerId, { x: e.clientX, y: e.clientY }); gMax = Math.max(gMax, touches.size); }
+function gMove(e) { const t = touches.get(e.pointerId); if (t && Math.hypot(e.clientX - t.x, e.clientY - t.y) > TAP_SLOP) gMoved = true; }
+function gUp(e) {
+  if (!touches.delete(e.pointerId) || touches.size) return;
+  if (!gMoved && performance.now() - gStart < TAP_MS) { if (gMax === 2) undo(); else if (gMax === 3) redo(); }
+}
+
+// ---- pen diagnostics (?debug=1): shows and logs what the browser reports for the S Pen ----
+let lastDbg = "";
+function dbg(e, tag) {
+  if (!DEBUG) return;
+  const key = `${tag}|${e.pointerType}|${e.button}|${e.buttons}`, msg = `${key}|p=${(e.pressure || 0).toFixed(2)}`;
+  $("dbg").hidden = false; $("dbg").textContent = `${tag} ${e.pointerType} button=${e.button} buttons=${e.buttons} p=${(e.pressure || 0).toFixed(2)}`;
+  if (key === lastDbg) return; lastDbg = key;
+  fetch("/api/debug", { method: "POST", body: msg, headers: { "X-Token": token }, keepalive: true }).catch(() => {});
+}
+
+// ---- toast + send ----
 let toastTimer;
 function toast(msg, kind = "ok") {
   const t = $("toast"); t.textContent = msg; t.className = "show " + kind;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = "", 2200);
 }
-
 $("send").onclick = async () => {
-  if (!strokes.length) return toast("Nothing drawn yet", "bad");
+  if (!objects.length) return toast("Nothing drawn yet", "bad");
   const r = wrap.getBoundingClientRect(), k = Math.min(1, MAX_EXPORT / Math.max(r.width, r.height));
   const out = document.createElement("canvas"); out.width = Math.round(r.width * k); out.height = Math.round(r.height * k);
-  const oc = out.getContext("2d"); oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height); paint(oc, k);
+  const oc = out.getContext("2d"); oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height);
+  oc.scale(k, k); for (const o of objects) drawObj(oc, o);
   const blob = await new Promise(res => out.toBlob(res, "image/png"));
   $("send").disabled = true;
   try {
@@ -155,7 +412,7 @@ $("send").onclick = async () => {
 };
 
 new ResizeObserver(fit).observe(wrap);
-fit();
+updateUI(); fit();
 </script>
 </body>
 </html>

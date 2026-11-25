@@ -21,7 +21,13 @@ sketch stop
 
 Then tell Claude "check my latest sketch". It reads `~/tablet-sketches/latest.png` and `latest.txt`.
 
-- **Pen only by default.** Finger and palm touches are ignored; the *Finger* button turns finger drawing on. The pen's eraser end erases.
+- **Pen only by default.** Finger and palm touches are ignored; the *Finger* button turns finger drawing on.
+- **Tools.** Pen (pressure-sensitive), Shapes (line, arrow, rectangle, ellipse), Eraser (removes a whole stroke or shape per touch, sweeping the path so a fast flick can't skip it) and Select.
+- **S Pen side button = erase.** Hold it while drawing and the Pen tool erases for that stroke; the pen's eraser end does the same. Mouse right-click does not.
+- **Hold to straighten.** Pause the pen at the end of a stroke that is already nearly straight (within 12% of its length) and it snaps to a line that follows the pen until you lift.
+- **Select.** Draw a lasso around things, drag inside the box to move them, drag a corner to resize, *Delete* to remove. Tapping outside clears the selection.
+- **Undo / redo.** Buttons, plus a two-finger tap (undo) and three-finger tap (redo). *Clear* is undoable. Moves, resizes, erases and deletes are each one undo step.
+- **Pen diagnostics.** Add `&debug=1` to the URL to show what the browser reports for the pen (type, button, buttons, pressure) and log changes on the laptop (`journalctl --user -u sketchpad | grep pen-debug`).
 - **Auth.** Every request needs a random token (`~/.config/sketchpad/token`, mode 600), regenerated on every `sketch start` so old links die. Over Tailscale the link is encrypted and nothing is exposed on the local Wi-Fi.
 - **`--lan` is plain HTTP.** It binds to the Wi-Fi address only, but on an open or shared network the token and your sketches can be sniffed. Use it for short sessions on a network you trust; otherwise use Tailscale.
 - **Saved files.** `~/tablet-sketches/<timestamp>.png` + `.txt`, and `latest.png` / `latest.txt` symlinks.
