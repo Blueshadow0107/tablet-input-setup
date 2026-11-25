@@ -22,9 +22,10 @@ sketch stop
 Then tell Claude "check my latest sketch". It reads `~/tablet-sketches/latest.png` and `latest.txt`.
 
 - **Pen only by default.** Finger and palm touches are ignored; the *Finger* button turns finger drawing on.
-- **Tools.** Pen (pressure-sensitive), Shapes (line, arrow, rectangle, ellipse), Eraser (removes a whole stroke or shape per touch, sweeping the path so a fast flick can't skip it) and Select.
+- **Tools.** Pen (pressure-sensitive), Shapes (line, arrow, rectangle, ellipse), Fill, Eraser (removes a whole stroke or shape per touch, sweeping the path so a fast flick can't skip it) and Select.
 - **S Pen side button = tap to toggle Pen ↔ Eraser.** Tap it while hovering (or press it mid-stroke: the ink so far is kept and the rest of the stroke erases) and the tool flips; tap again to go back to the tool you had (Select too). Holding the button while touching can't work: Chromium swallows button-held touches, so no events reach the page. Samsung's Air Command may also pop up on a tap (it's a global setting, not per-site). The pen's eraser end erases directly. Mouse right-click does not.
 - **Hold to straighten.** Pause the pen at the end of a stroke that is already nearly straight (within 12% of its length) and it snaps to a line that follows the pen until you lift.
+- **Fill.** Pick a colour, tap inside a closed shape (or any area) and it floods up to the nearest lines. A gap in the outline lets it leak out, so close the shape first. A fill is one undo step; the Eraser removes it by touching the spot you tapped; Select ignores it.
 - **Select.** Draw a lasso around things, drag inside the box to move them, drag a corner to resize, *Delete* to remove. Tapping outside clears the selection.
 - **Undo / redo.** Buttons, plus a two-finger tap (undo) and three-finger tap (redo). *Clear* is undoable. Moves, resizes, erases and deletes are each one undo step.
 - **Pen diagnostics.** Add `&debug=1` to the URL to show what the browser reports for the pen (type, button, buttons, pressure) and log changes on the laptop (`journalctl --user -u sketchpad | grep pen-debug`).

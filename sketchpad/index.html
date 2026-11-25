@@ -81,7 +81,10 @@
 "use strict";
 // ---- constants (everything tunable lives here) ----
 const COLORS = ["#16121f", "#d12e4f", "#1f6feb", "#1a9b5b", "#e0881a", "#7c3aed"];
-const TOOLS = [["pen", "Pen"], ["shapes", "Shapes"], ["eraser", "Eraser"], ["select", "Select"]];
+const TOOLS = [["pen", "Pen"], ["shapes", "Shapes"], ["fill", "Fill"], ["eraser", "Eraser"], ["select", "Select"]];
+const FILL_TOL = 150;          // bucket fill: how far (sum of R+G+B differences) a pixel may be from the one tapped and still be filled; high enough to swallow the anti-aliased halo of a line
+const PEN_LIFT_GUARD_MS = 150; // no side-button toggle this soon after the pen last touched (a lifting tip reports buttons=1 with tiny pressure)
+const TOGGLE_DELAY_MS = 90;    // the toggle waits this long and is cancelled if the pen lands: light contact looks like a button press until the pointerdown arrives
 const SHAPES = [["line", "Line"], ["arrow", "Arrow"], ["rect", "Rect"], ["ellipse", "Ellipse"]];
 const CUSTOM_START = "#0ea5a5"; // first colour of the custom slot (wheel / hex / HSL)
 const WHEEL_PX = 220;           // css size of the colour wheel
@@ -108,6 +111,7 @@ let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur =
 let airBtn = false;           // the button is currently seen held in the air (rising edge = one toggle)
 let ignoreHeld = false;       // the press already acted mid-stroke; ignore the "still held" hover that follows the lift
 let prevTool = "pen", lastToggle = 0;
+let penArmed = false, lastPenUp = 0, toggleT = 0; // armed = a real hover with buttons=0 was seen since the pen last touched; only then can buttons=1 be a button tap
 const dpr = () => window.devicePixelRatio || 1;
 
 // ---- toolbar ----
@@ -206,6 +210,7 @@ function distSeg(p, a, b) {
 }
 function outline(o) {
   if (o.type === "stroke") return o.pts;
+  if (o.type === "fill") return [{ x: o.x, y: o.y }]; // the eraser removes a fill by touching the spot that was tapped
   const { a, b } = o;
   if (o.kind === "line" || o.kind === "arrow") return [a, b];
   if (o.kind === "rect") return [a, { x: b.x, y: a.y }, b, { x: a.x, y: b.y }, a];
@@ -248,7 +253,30 @@ function mapObj(o, f) {
 const selObjs = () => objects.filter(o => sel.has(o.id));
 
 // ---- drawing ----
+// Bucket fill: repaints whatever is already on the canvas `c`, so it must be drawn in object order. Works on device pixels, so it reads the context's own scale.
+function floodFill(c, o) {
+  const s = c.getTransform().a, W = c.canvas.width, H = c.canvas.height, sx = Math.round(o.x * s), sy = Math.round(o.y * s);
+  if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
+  const img = c.getImageData(0, 0, W, H), d = img.data, i0 = (sy * W + sx) * 4, r0 = d[i0], g0 = d[i0 + 1], b0 = d[i0 + 2];
+  const nr = parseInt(o.color.slice(1, 3), 16), ng = parseInt(o.color.slice(3, 5), 16), nb = parseInt(o.color.slice(5, 7), 16);
+  if (r0 === nr && g0 === ng && b0 === nb) return;
+  const seen = new Uint8Array(W * H), stack = [sx, sy];
+  const ok = i => Math.abs(d[i] - r0) + Math.abs(d[i + 1] - g0) + Math.abs(d[i + 2] - b0) <= FILL_TOL;
+  while (stack.length) {
+    const y = stack.pop(); let x = stack.pop();
+    while (x >= 0 && !seen[y * W + x] && ok((y * W + x) * 4)) x--;
+    x++;
+    let up = false, dn = false;
+    for (; x < W && !seen[y * W + x] && ok((y * W + x) * 4); x++) {
+      const k = y * W + x; seen[k] = 1; d[k * 4] = nr; d[k * 4 + 1] = ng; d[k * 4 + 2] = nb; d[k * 4 + 3] = 255;
+      if (y > 0) { const f = !seen[k - W] && ok((k - W) * 4); if (f && !up) stack.push(x, y - 1); up = f; }
+      if (y < H - 1) { const f = !seen[k + W] && ok((k + W) * 4); if (f && !dn) stack.push(x, y + 1); dn = f; }
+    }
+  }
+  c.putImageData(img, 0, 0);
+}
 function drawObj(c, o) {
+  if (o.type === "fill") return floodFill(c, o);
   c.strokeStyle = o.color; c.lineCap = c.lineJoin = "round";
   if (o.type === "stroke") {
     const P = o.pts;
@@ -345,6 +373,10 @@ function startStroke(e) {
   const b = { pid: e.pointerId, ptype: e.pointerType, color, size };
   if (t === "pen") { cur = { ...b, mode: "pen", pts: [p] }; armHold(); }
   else if (t === "shapes") cur = { ...b, mode: "shape", kind: shapeKind, a: p, b: p };
+  else if (t === "fill") {
+    const q = bctx.getImageData(Math.round(p.x * dpr()), Math.round(p.y * dpr()), 1, 1).data, hex = "#" + [q[0], q[1], q[2]].map(v => v.toString(16).padStart(2, "0")).join("");
+    if (hex === color.toLowerCase()) return; // already that colour: nothing to do, and no empty undo step
+    commit([...objects, { id: nextId++, type: "fill", color, size: 0, x: p.x, y: p.y }]); return; }
   else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(14, size * 3) }; eraseAt(p); }
   else selectDown(p, b);
   present();
@@ -383,10 +415,11 @@ function trySnap() {
 function cancelCur() { clearTimeout(holdT); cur = null; hidden.clear(); rebase(); present(); }
 
 function trackPenButton(e) { // hover moves only: a rising edge of the side button (buttons=1, tip not pressing, no stroke in progress) toggles Pen/Eraser once
-  if (!e.buttons) { airBtn = false; ignoreHeld = false; return; }
-  if (cur || penTouching(e) || airBtn) return;
-  airBtn = true;
-  if (!ignoreHeld) togglePenTool();
+  if (!e.buttons) { airBtn = false; ignoreHeld = false; if (!cur && !penTouching(e)) penArmed = true; return; }
+  if (e.buttons !== 1 || cur || penTouching(e) || airBtn || !penArmed || performance.now() - lastPenUp < PEN_LIFT_GUARD_MS) return;
+  airBtn = true; penArmed = false;
+  if (ignoreHeld) return;
+  clearTimeout(toggleT); toggleT = setTimeout(() => { toggleT = 0; togglePenTool(); }, TOGGLE_DELAY_MS);
 }
 function onMove(e) {
   if (e.pointerType === "touch") gMove(e);
@@ -415,7 +448,7 @@ function step(p) {
 }
 function onUp(e) {
   if (e.pointerType === "touch") gUp(e);
-  if (e.pointerType === "pen" && !e.buttons) airBtn = false;
+  if (e.pointerType === "pen") { lastPenUp = performance.now(); penArmed = false; if (!e.buttons) airBtn = false; }
   dbg(e, "up");
   if (!cur || e.pointerId !== cur.pid) return;
   clearTimeout(holdT);
@@ -434,7 +467,7 @@ function onUp(e) {
     case "lasso": {
       let area = 0; for (let i = 0; i < c.pts.length; i++) { const q = c.pts[(i + 1) % c.pts.length]; area += c.pts[i].x * q.y - q.x * c.pts[i].y; }
       if (c.pts.length >= 3 && Math.abs(area / 2) > 400) {
-        for (const o of objects) { const S = samples(o); if (S.filter(q => inPoly(q, c.pts)).length >= S.length / 2) sel.add(o.id); }
+        for (const o of objects) { if (o.type === "fill") continue; const S = samples(o); if (S.filter(q => inPoly(q, c.pts)).length >= S.length / 2) sel.add(o.id); }
       }
       updateUI(); present(); break; }
     case "move": case "scale": {
@@ -445,6 +478,7 @@ function onUp(e) {
   }
 }
 cv.addEventListener("pointerdown", e => {
+  if (e.pointerType === "pen") { clearTimeout(toggleT); toggleT = 0; penArmed = false; } // the pen landed: whatever looked like a button tap was just light contact
   dbg(e, "down"); // a pen landing always starts a stroke: its pressure can't tell a plain tip from the button (plain tips measured 0.0059, 0.0112 too)
   if (e.pointerType === "touch") {
     gDown(e);
