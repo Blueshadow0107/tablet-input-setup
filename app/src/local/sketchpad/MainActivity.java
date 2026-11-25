@@ -27,12 +27,14 @@ public class MainActivity extends Activity implements Runnable {
     private static final long BTN_CONFIRM_MS = 110;
     // A grip that squeezes the button mid-stroke can hold it for a long time, and each one erases. A press that begins while the tip is touching must last this long.
     private static final long BTN_CONFIRM_TOUCH_MS = 450;
+    // The digitizer reports buttons=0 for a moment when the tip lands and flickers 0/32 during contact: a release only counts once the button has been off this long.
+    private static final long BTN_RELEASE_GRACE_MS = 120;
     private static final String TAG = "sketchpad";
     private WebView web;
     private int lastButtons = -1;
     private boolean held = false, nativeDriven = false, rawHeld = false, touching = false;
     private boolean pressedInAir = false;
-    private long rawSince = 0;
+    private long rawSince = 0, falseSince = -1;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -111,18 +113,23 @@ public class MainActivity extends Activity implements Runnable {
             Log.d(TAG, "pen action=" + MotionEvent.actionToString(a) + " buttons=" + bs + " pressure=" + e.getPressure());
         }
         boolean raw = (bs & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
-        if (a == MotionEvent.ACTION_HOVER_EXIT) raw = false;
         long t = e.getEventTime();
         if (a == MotionEvent.ACTION_DOWN) touching = true;
         if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) touching = false;
-        if (raw != rawHeld) { // the raw button state changed: start timing it
-            rawHeld = raw;
-            rawSince = t;
-            pressedInAir = raw && !touching; // where the press began decides how long it must last
-            if (raw && web != null) {  // re-check even if the pen then stays still
-                web.postDelayed(this, BTN_CONFIRM_MS + 5);
-                web.postDelayed(this, BTN_CONFIRM_TOUCH_MS + 5);
+        if (raw) {
+            falseSince = -1;                 // still down (a gap of less than BTN_RELEASE_GRACE_MS never ends a press)
+            if (!rawHeld) {                  // a new press: start timing it
+                rawHeld = true;
+                rawSince = t;
+                pressedInAir = !touching;    // where the press began decides how long it must last
+                if (web != null) {           // re-check even if the pen then stays still
+                    web.postDelayed(this, BTN_CONFIRM_MS + 5);
+                    web.postDelayed(this, BTN_CONFIRM_TOUCH_MS + 5);
+                }
             }
+        } else if (rawHeld && falseSince < 0) {
+            falseSince = t;                  // off for now: it only counts as released if it stays off
+            if (web != null) web.postDelayed(this, BTN_RELEASE_GRACE_MS + 5);
         }
         updateHeld(t);
         if (a == MotionEvent.ACTION_DOWN) nativeDriven = held;
@@ -135,8 +142,12 @@ public class MainActivity extends Activity implements Runnable {
         }
     }
 
-    // a release counts at once; a press only after it has lasted BTN_CONFIRM_MS
+    // a press counts once it has lasted BTN_CONFIRM_MS (longer if it began while touching); a release once the button stayed off for BTN_RELEASE_GRACE_MS
     private void updateHeld(long now) {
+        if (rawHeld && falseSince >= 0 && now - falseSince >= BTN_RELEASE_GRACE_MS) {
+            rawHeld = false;
+            falseSince = -1;
+        }
         boolean h = rawHeld && now - rawSince >= (pressedInAir ? BTN_CONFIRM_MS : BTN_CONFIRM_TOUCH_MS);
         if (h != held) {
             held = h;
