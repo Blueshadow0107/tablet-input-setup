@@ -454,14 +454,14 @@ setInterval(pollInbox, POLL_MS); pollInbox();
 
 // ---- cut / copy / paste of the selected objects (fills are not selectable, so they are not copied) ----
 const cloneObj = (o, d) => ({ ...mapObj(o, q => ({ x: q.x + d, y: q.y + d })), id: nextId++ });
-function copySel() { if (!sel.size) return; clip = selObjs().map(o => structuredClone(o)); pasteN = 0; updateUI(); present(); toast("Copied " + clip.length); }
+function copySel() { if (!sel.size) return; clip = [...selObjs(), ...fillsInSel()].map(o => structuredClone(o)); pasteN = 0; updateUI(); present(); toast("Copied " + sel.size); }
 function cutSel() { if (!sel.size) return; copySel(); deleteSel(); toast("Cut " + clip.length + " (Undo brings it back)"); }
 function pasteClip() {
   if (!clip.length) return;
   pasteN++;
   const add = clip.map(o => cloneObj(o, PASTE_OFFSET * pasteN));
   commit([...objects, ...add]);
-  setTool("select"); sel.clear(); add.forEach(o => sel.add(o.id)); updateUI(); present(); // the copies are selected: drag them straight away
+  setTool("select"); sel.clear(); add.filter(o => o.type !== "fill").forEach(o => sel.add(o.id)); updateUI(); present(); // the copies are selected: drag them straight away
 }
 $("selcut").onclick = cutSel; $("selcopy").onclick = copySel; $("selpaste").onclick = pasteClip; $("seldel").onclick = deleteSel; $("paste").onclick = pasteClip;
 function placeSelBar(bb) { // the floating Cut/Copy/Paste/Delete bar sits above the selection (below it if there is no room), hidden while dragging
@@ -548,31 +548,49 @@ function bboxOf(list, f) {
   return list.length ? { x0, y0, x1, y1 } : null;
 }
 function mapObj(o, f) {
+  if (o.type === "fill") { // a fill is a seed point + the box it filled
+    const q = f({ x: o.x, y: o.y }), r = { ...o, x: q.x, y: q.y };
+    if (o.box) { const a = f({ x: o.box.x0, y: o.box.y0 }), b = f({ x: o.box.x1, y: o.box.y1 }); r.box = { x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y), x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y) }; }
+    return r;
+  }
   return o.type === "stroke" ? { ...o, pts: o.pts.map(p => ({ ...f(p), p: p.p })) } : { ...o, a: f(o.a), b: f(o.b) };
 }
 const selObjs = () => objects.filter(o => sel.has(o.id));
+function fillsInSel() { // a fill remembers only a spot, so the fills made inside the selected shapes must move / scale / copy / delete with them
+  const shapes = selObjs().filter(o => o.type !== "fill"), bb = shapes.length ? bboxOf(shapes) : null;
+  // a fill belongs to the selection when the whole box it covers lies inside the selected shapes' bounds (seed point only, for old fills without a box).
+  // Using the box, not just the seed, keeps a copy pasted on top of the original from claiming the original's fill.
+  const mine = o => o.box ? (o.box.x0 >= bb.x0 - 6 && o.box.x1 <= bb.x1 + 6 && o.box.y0 >= bb.y0 - 6 && o.box.y1 <= bb.y1 + 6) : (o.x >= bb.x0 - 4 && o.x <= bb.x1 + 4 && o.y >= bb.y0 - 4 && o.y <= bb.y1 + 4);
+  return bb ? objects.filter(o => o.type === "fill" && mine(o)) : [];
+}
 
 // ---- drawing ----
 // Bucket fill: repaints whatever is already on the canvas `c`, so it must be drawn in object order. Works on device pixels, so it reads the context's own scale.
 function floodFill(c, o) {
+  if (o.skip) return; // neutralised: an old fill that used to flood the whole page
   const m = c.getTransform(), W = c.canvas.width, H = c.canvas.height, sx = Math.round(o.x * m.a + m.e), sy = Math.round(o.y * m.d + m.f); // world -> device pixels, incl. zoom/pan
-  if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
+  let bx0 = 0, by0 = 0, bx1 = W - 1, by1 = H - 1; // device-pixel limits: the box this fill covered when it was made (+2 px), so moving/erasing a shape can never make it flood the page
+  if (o.box) { bx0 = Math.max(0, Math.floor(o.box.x0 * m.a + m.e) - 2); by0 = Math.max(0, Math.floor(o.box.y0 * m.d + m.f) - 2); bx1 = Math.min(W - 1, Math.ceil(o.box.x1 * m.a + m.e) + 2); by1 = Math.min(H - 1, Math.ceil(o.box.y1 * m.d + m.f) + 2); }
+  if (sx < bx0 || sy < by0 || sx > bx1 || sy > by1) return;
   const img = c.getImageData(0, 0, W, H), d = img.data, i0 = (sy * W + sx) * 4, r0 = d[i0], g0 = d[i0 + 1], b0 = d[i0 + 2];
   const nr = parseInt(o.color.slice(1, 3), 16), ng = parseInt(o.color.slice(3, 5), 16), nb = parseInt(o.color.slice(5, 7), 16);
   if (r0 === nr && g0 === ng && b0 === nb) return;
-  const seen = new Uint8Array(W * H), stack = [sx, sy];
+  const seen = new Uint8Array(W * H), stack = [sx, sy]; let minX = sx, maxX = sx, minY = sy, maxY = sy, cnt = 0;
   const ok = i => Math.abs(d[i] - r0) + Math.abs(d[i + 1] - g0) + Math.abs(d[i + 2] - b0) <= FILL_TOL;
   while (stack.length) {
     const y = stack.pop(); let x = stack.pop();
-    while (x >= 0 && !seen[y * W + x] && ok((y * W + x) * 4)) x--;
+    while (x >= bx0 && !seen[y * W + x] && ok((y * W + x) * 4)) x--;
     x++;
     let up = false, dn = false;
-    for (; x < W && !seen[y * W + x] && ok((y * W + x) * 4); x++) {
+    for (; x <= bx1 && !seen[y * W + x] && ok((y * W + x) * 4); x++) {
       const k = y * W + x; seen[k] = 1; d[k * 4] = nr; d[k * 4 + 1] = ng; d[k * 4 + 2] = nb; d[k * 4 + 3] = 255;
-      if (y > 0) { const f = !seen[k - W] && ok((k - W) * 4); if (f && !up) stack.push(x, y - 1); up = f; }
-      if (y < H - 1) { const f = !seen[k + W] && ok((k + W) * 4); if (f && !dn) stack.push(x, y + 1); dn = f; }
+      cnt++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (y > by0) { const f = !seen[k - W] && ok((k - W) * 4); if (f && !up) stack.push(x, y - 1); up = f; }
+      if (y < by1) { const f = !seen[k + W] && ok((k + W) * 4); if (f && !dn) stack.push(x, y + 1); dn = f; }
     }
   }
+  if (o.legacy && !o.box && cnt > 0.7 * W * H) { o.skip = true; return; } // a saved fill from before fills were boxed that floods most of the page is an accident (shape moved/erased): drop it
+  if (!o.box) o.box = { x0: (minX - 2 - m.e) / m.a, y0: (minY - 2 - m.f) / m.d, x1: (maxX + 2 - m.e) / m.a, y1: (maxY + 2 - m.f) / m.d }; // remember what this fill covered (world px)
   c.putImageData(img, 0, 0);
 }
 const imgs = new Map(); // pictures on the canvas (type "image", a rect a-b): drawn into the ink layer, so the Fill tool sees their pixels
@@ -707,7 +725,7 @@ function commit(next) {
 }
 function undo() { if (!undoStack.length) return toast("Nothing to undo", "bad"); redoStack.push(objects); objects = undoStack.pop(); afterChange(); }
 function redo() { if (!redoStack.length) return toast("Nothing to redo", "bad"); undoStack.push(objects); objects = redoStack.pop(); afterChange(); }
-function deleteSel() { if (!sel.size) return; commit(objects.filter(o => !sel.has(o.id))); sel.clear(); updateUI(); present(); }
+function deleteSel() { if (!sel.size) return; const gone = new Set([...sel, ...fillsInSel().map(o => o.id)]); commit(objects.filter(o => !gone.has(o.id))); sel.clear(); updateUI(); present(); }
 
 // ---- pointer input ----
 // On the S Pen in Chrome the side button is NOT a separate button: it arrives as buttons=1 with ~0 pressure while hovering,
@@ -761,11 +779,13 @@ function selectDown(p, b) {
   if (bb) {
     for (const [i, [hx, hy]] of corners(bb).entries()) if (Math.hypot(p.x - hx, p.y - hy) <= HANDLE_R / view.s) {
       const [ox, oy] = corners(bb)[(i + 2) % 4];
-      cur = { ...b, mode: "scale", ox, oy, hx, hy, s: 1 }; hidden = new Set(sel); rebase(); return;
+      const fillIds = fillsInSel().map(o => o.id);
+      cur = { ...b, mode: "scale", ox, oy, hx, hy, s: 1, fillIds }; hidden = new Set([...sel, ...fillIds]); rebase(); return;
     }
     const m8 = 8 / view.s;
     if (p.x >= bb.x0 - m8 && p.x <= bb.x1 + m8 && p.y >= bb.y0 - m8 && p.y <= bb.y1 + m8) {
-      cur = { ...b, mode: "move", sx: p.x, sy: p.y, dx: 0, dy: 0 }; hidden = new Set(sel); rebase(); return;
+      const fillIds = fillsInSel().map(o => o.id);
+      cur = { ...b, mode: "move", sx: p.x, sy: p.y, dx: 0, dy: 0, fillIds }; hidden = new Set([...sel, ...fillIds]); rebase(); return;
     }
   }
   sel.clear(); cur = { ...b, mode: "lasso", pts: [p] };
@@ -851,7 +871,7 @@ function onUp(e) {
     case "move": case "scale": {
       const f = c.mode === "move" ? (p => ({ x: p.x + c.dx, y: p.y + c.dy })) : (p => ({ x: c.ox + (p.x - c.ox) * c.s, y: c.oy + (p.y - c.oy) * c.s }));
       const moved = c.mode === "move" ? Math.hypot(c.dx, c.dy) > 2 : Math.abs(c.s - 1) > 0.01;
-      if (moved) commit(objects.map(o => sel.has(o.id) ? mapObj(o, f) : o)); else { hidden.clear(); rebase(); present(); }
+      if (moved) commit(objects.map(o => (sel.has(o.id) || (c.fillIds || []).includes(o.id)) ? mapObj(o, f) : o)); else { hidden.clear(); rebase(); present(); }
       break; }
   }
 }
@@ -1002,6 +1022,7 @@ try { // restore the saved canvas: { pageName: [objects], "": blank paper }; the
   if (saved === null) { const old = JSON.parse(localStorage.getItem("sketchpad.canvas") || "[]"); saved = { "": Array.isArray(old) ? old : [] }; }
   let maxId = 0;
   for (const [k, list] of Object.entries(saved)) if (Array.isArray(list)) { for (const o of list) maxId = Math.max(maxId, +o.id || 0); if (k !== "") store[k] = { objects: list, undo: [], redo: [] }; }
+  for (const list of Object.values(saved)) if (Array.isArray(list)) for (const o of list) if (o.type === "fill" && !o.box) o.legacy = true; // old fills have no box yet
   if (Array.isArray(saved[""])) objects = saved[""];
   nextId = Math.max(nextId, maxId + 1);
 } catch (_) { /* unreadable: start empty */ }
