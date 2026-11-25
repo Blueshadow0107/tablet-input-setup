@@ -145,9 +145,19 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
         if path == "/":
-            return self._send(HTTPStatus.OK, (HERE / "index.html").read_bytes(), "text/html; charset=utf-8")
+            tok = (parse_qs(urlparse(self.path).query).get("t") or [""])[0] or self.headers.get("X-Token", "")
+            page = (HERE / "index.html").read_bytes().replace(b"__TOKEN__", re.sub(r"[^A-Za-z0-9_-]", "", tok).encode())  # the manifest/icon links carry the same token
+            return self._send(HTTPStatus.OK, page, "text/html; charset=utf-8")
         if path == "/api/health":
             return self._json(HTTPStatus.OK, {"ok": True})
+        if path == "/manifest.webmanifest":  # makes Chrome offer "Install app" (standalone window, no tab strip); needs a secure context = http://localhost over USB
+            tok = (parse_qs(urlparse(self.path).query).get("t") or [""])[0]
+            icons = [{"src": f"/icon-{n}.png?t={tok}", "sizes": f"{n}x{n}", "type": "image/png", "purpose": "any maskable"} for n in (192, 512)]
+            manifest = {"name": "Sketchpad", "short_name": "Sketchpad", "id": "/", "start_url": f"/?t={tok}", "scope": "/",
+                        "display": "standalone", "orientation": "any", "background_color": "#0f0a1a", "theme_color": "#1a1230", "icons": icons}
+            return self._send(HTTPStatus.OK, json.dumps(manifest).encode(), "application/manifest+json")
+        if path in ("/icon-192.png", "/icon-512.png"):
+            return self._send(HTTPStatus.OK, (HERE / "icons" / path[1:]).read_bytes(), "image/png")
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
