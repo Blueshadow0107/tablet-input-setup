@@ -1,0 +1,49 @@
+# Sketchpad: features and reference
+
+Draw on the tablet, hit Send, and a PNG (plus an optional caption) lands on the laptop where Claude can read it. No app on the tablet, and it's light on its 4 GB of RAM.
+
+```bash
+sketch start                    # serve on Tailscale AND the Wi-Fi address (default); prints a URL for each
+sketch start --tailscale-only   # no LAN listener (use on open/shared Wi-Fi)
+sketch url                      # print the URLs again
+sketch rotate                   # new token (old bookmarks die) and restart
+sketch app [--rebuild]              # the wrapper app on a USB-connected tab: installs it if missing, points it at the server, launches it
+sketch usb [--open]              # tab on a USB cable: adb-forwards its localhost:5099 to the laptop (no network at all); --open launches it on the tab
+sketch latest         # path + caption of the newest sketch
+sketch stop
+```
+
+Then tell Claude "check my latest sketch". It reads `~/tablet-sketches/latest.png` and `latest.txt`.
+
+- **Pen only by default.** Finger and palm touches are ignored; the *Finger* button turns finger drawing on.
+- **Tools.** Pen (pressure-sensitive), Shapes (line, arrow, rectangle, ellipse), Fill, Eraser (removes a whole stroke or shape per touch, sweeping the path so a fast flick can't skip it) and Select.
+- **S Pen side button = tap to toggle Pen ↔ Eraser.** Tap it while hovering (or press it mid-stroke: the ink so far is kept and the rest of the stroke erases) and the tool flips; tap again to go back to the tool you had (Select too). Holding the button while touching can't work: Chromium swallows button-held touches, so no events reach the page. Samsung's Air Command may also pop up on a tap (it's a global setting, not per-site). The pen's eraser end erases directly. Mouse right-click does not.
+- **Hold to straighten.** Pause the pen at the end of a stroke that is already nearly straight (within 12% of its length) and it snaps to a line that follows the pen until you lift.
+- **Install as an app.** Over the USB route (`sketch usb`, `localhost` counts as a secure context) Chrome offers *Install app* in its menu: a standalone window with no tab strip, lighter on the tab's memory. Over Wi-Fi/Tailscale (plain HTTP) only *Add to Home screen* appears. Icons come from `make-icons.py`; the manifest is served by the server with your token baked in.
+- **In the wrapper app (`app/`), the S Pen button works two ways:** a quick press in the air toggles Pen/Eraser; holding it while you touch erases for as long as it is held (a press mid-stroke keeps the ink so far and erases the rest). The app reads the button natively and tells the page, because Chrome hides button-held touches. `app/build.sh install` builds and installs it.
+- **Pages.** `sketch put <file.html|dir> [name]` puts a page Claude wrote on the tab (top-left Pages button): it shows behind your ink in a sandboxed iframe, with a Draw / Use switch. Send then records which page and what size, and `sketch compose` (also run by `sketch latest`) renders the page with your ink on top. The Claude-side skill is in `skill/SKILL.md` (install: copy to `~/.claude/skills/sketchpad/`).
+
+- **Attaching a session** (like a chat-bot attach): tell Claude "use the tab"; it runs `sketch watch` in the background, so every Send wakes it, and answers on the tab (`sketch note`, `sketch put`, `sketch image`) instead of in the terminal.
+- **Claude -> tab (the loop).** `sketch put <page> --open` and `sketch note \"text\"` write to `~/tablet-sketches/inbox.json`; the tab polls it every 5 s and shows a dot on Pages plus a banner (Open / Dismiss). It never opens a page by itself. A banner stays until you dismiss it or open the page; it never hides by itself. A refresh clears whatever was left (each load starts from "everything already there is seen"), so send notes after the tab has loaded.
+- **Zoom and pan.** Two fingers: pinch to zoom, or drag them together to pan. It decides once per gesture (the distance changing more than the midpoint moving = zoom, otherwise pan), so a sloppy pinch never also drifts the view. The pen never zooms. The **lock** button (top bar) switches pinch zoom off so it can't happen by accident (the 2-finger-tap undo still works); the **%** pill appears when zoomed and resets to 100%. Ctrl+wheel zooms on a laptop. Sent images are always the unzoomed canvas, and a page behind the ink zooms with it.
+- **Promote blank paper to a page.** `sketch put <page> --adopt`: when you tap Open, the ink on blank paper moves into that page and blank paper is left empty (the page carries the paper it had).
+- **Draggable banner.** Drag a Claude banner by its text with a finger (or the pen) to move it out of the way; it stays where you leave it (not from its buttons).
+- **Refresh + Send feedback.** If Claude updates the page you have open (`sketch put … --open` with the same name), it refreshes in place with no banner (it waits while a stroke is in progress); a refresh button (top bar) does it by hand. Send shows a spinner and "Sending…" from the first tap, then "✓ Sent" (green) or "Failed" (red), and ignores extra taps meanwhile.
+- **Pictures on the canvas.** `sketch image <file.png|jpg|webp> [name]` sends a picture; the banner offers *Add to canvas*. It becomes an object in the ink layer (blank paper or the open page's own ink), so Fill, Select/move/resize, undo, autosave and Send all work on it. Use this, not a page, when the user wants to colour or move something: the Fill tool cannot see a page's content (it sits in a separate layer behind the ink).
+- **Fills follow their shapes.** A fill remembers the box it covered, so it can never flood past it (even if its shape is erased), and a fill whose box lies inside the selected shapes moves, resizes, copies, cuts and deletes with them. While you drag, the filled colour is hidden and snaps back when you drop.
+- **Eyedropper.** In the colour menu (tap the rainbow swatch) the dropper button takes the exact colour of the next tap on your drawing (ink, fills, pictures, paper), then the menu comes back showing it. Tap any other control to cancel. Over a page there is nothing to pick (a page is a separate layer).
+- **Ink per page.** Blank paper and each page keep their own ink and their own undo history, so nothing gets tangled when you switch; Clear and Send act on the current one only.
+- **Paper.** On blank paper the grid button (top bar) cycles blank / dots / lines (lines run vertically, matching writing turned a quarter turn); it is hidden over a page. It is drawn in world space, so it fills the whole canvas at any zoom and pan, is included in the sent image, and is remembered. Over a page the paper is off (the page is the background).
+- **Autosave.** The canvas is saved on the device after every change and restored on load.
+- **Fill.** Pick a colour, tap inside a closed shape (or any area) and it floods up to the nearest lines. A gap in the outline lets it leak out, so close the shape first. A fill is one undo step; the Eraser removes it by touching the spot you tapped; Select ignores it.
+- **Cut, copy, paste.** Select something and a small bar appears above it (Cut, Copy, Paste, Delete); the panel also has a Paste button. Pasted copies land 24 px down-right of the last one and are selected so you can drag them at once. Ctrl+C/X/V work with a keyboard. Fills are not selectable, so they are not copied.
+- **Select.** Draw a lasso around things, drag inside the box to move them, drag a corner to resize, *Delete* to remove. Tapping outside clears the selection.
+- **Undo / redo.** Buttons, plus a two-finger tap (undo) and three-finger tap (redo). *Clear* is undoable. Moves, resizes, erases and deletes are each one undo step.
+- **Pen diagnostics.** Add `&debug=1` to the URL to show what the browser reports for the pen (type, button, buttons, pressure) and log changes on the laptop (`journalctl --user -u sketchpad | grep pen-debug`).
+- **Auth.** Every request needs a random token (`~/.config/sketchpad/token`, mode 600), created once and kept, so the tab can bookmark the link. `sketch rotate` replaces it if it ever leaks. Over Tailscale the link is encrypted. The service panel's Sketchpad tile only starts/stops the unit and reuses what `sketch start` last saved.
+- **`sketch usb --open` leaves the token in a few places:** the `adb shell am start` command line (visible briefly to other processes on the laptop), the tab's Chrome history and its logcat. The token is already bookmarked on the tab, so this adds little; `sketch rotate` replaces it if you ever need to. Plain `sketch usb` (no `--open`) only prints the link.
+- **The LAN link is plain HTTP.** The server binds each address separately (Tailscale's, and the Wi-Fi one with `--also-lan`), never every interface, and re-checks every few seconds so Tailscale coming up later just works. On an open or shared network the token and sketches can be sniffed, and the token is now long-lived: use `--tailscale-only` there.
+- **Saved files.** `~/tablet-sketches/<timestamp>.png` + `.txt`, and `latest.png` / `latest.txt` symlinks.
+- **Not enabled at boot.** `sketchpad.service` starts only when you run `sketch start`.
+
+Code: `sketchpad/server.py` (stdlib only), `sketchpad/index.html`, `sketchpad/sketch.sh`, `sketchpad/sketchpad.service`. Install with `./install.sh`.

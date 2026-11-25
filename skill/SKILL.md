@@ -5,7 +5,7 @@ description: Work with the user's tablet sketchpad: read what they drew ("check 
 
 # Sketchpad (tablet ↔ laptop)
 
-The user draws on their Galaxy Tab S7 FE (wrapper app or browser); Send saves a PNG + caption on the laptop. Everything is driven by the `sketch` command (`~/Projects/tablet-input-setup/sketchpad/sketch.sh`, on PATH). Repo docs: `~/Projects/tablet-input-setup/README.md` and `AGENTS.md`. The repo is public: **never push without asking**.
+The user draws on their tablet (wrapper app or browser); Send saves a PNG + caption on the laptop. Everything is driven by the `sketch` command (`~/Projects/tablet-input-setup/sketchpad/sketch.sh`, on PATH). Repo docs: `~/Projects/tablet-input-setup/README.md` and `AGENTS.md`. The repo is public: **never push without asking**.
 
 ## Reading a sketch
 - "check my sketch" / "look at the latest image": run `sketch latest`, then Read the PNG it prints and the caption (`~/tablet-sketches/latest.txt`).

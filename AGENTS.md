@@ -1,11 +1,11 @@
 # AGENTS.md: tablet-input-setup
 
-Galaxy Tab S7 FE (SM-T733) ↔ laptop. Read `README.md` for usage. Workspace rules are in `~/AGENTS.md`.
+Tablet ↔ laptop sketchpad. Read `README.md` for usage. Workspace rules are in `~/AGENTS.md`.
 
 ## What's here
 
 - `sketchpad/`: **the working part.** `server.py` (stdlib only), `index.html` (the drawing page), `sketch.sh` (installed as `sketch`), `sketchpad.service`. Sketches land in `~/tablet-sketches/` with `latest.png` / `latest.txt`.
-- Weylus + KDE Connect: older notes and configs, **never run end to end**. Don't present them as verified.
+- `legacy/` + `docs/legacy.md`: older Weylus + KDE Connect notes and configs, **never run end to end**. Don't present them as verified. `docs/FEATURES.md` = full feature reference.
 
 ## When the user says "check my sketch"
 
