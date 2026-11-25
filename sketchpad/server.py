@@ -188,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
                 items = json.loads((self.out_dir / "inbox.json").read_text())
             except (OSError, ValueError):
                 items = []
-            return self._json(HTTPStatus.OK, {"items": items[-30:] if isinstance(items, list) else []})
+            return self._json(HTTPStatus.OK, {"items": items[-30:] if isinstance(items, list) else [], "now": int(time.time())})
         if path == "/api/pages":
             return self._json(HTTPStatus.OK, {"pages": list_pages(self.out_dir / "pages", self.token)})
         if path == "/":

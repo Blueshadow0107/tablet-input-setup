@@ -25,10 +25,13 @@ import android.widget.TextView;
 public class MainActivity extends Activity implements Runnable {
     // The grip can brush the S Pen button: it flickers on for 60-800 ms at zero pressure. A press only counts once it has been down this long.
     private static final long BTN_CONFIRM_MS = 110;
+    // A grip that squeezes the button mid-stroke can hold it for a long time, and each one erases. A press that begins while the tip is touching must last this long.
+    private static final long BTN_CONFIRM_TOUCH_MS = 450;
     private static final String TAG = "sketchpad";
     private WebView web;
     private int lastButtons = -1;
-    private boolean held = false, nativeDriven = false, rawHeld = false;
+    private boolean held = false, nativeDriven = false, rawHeld = false, touching = false;
+    private boolean pressedInAir = false;
     private long rawSince = 0;
 
     @Override
@@ -110,10 +113,16 @@ public class MainActivity extends Activity implements Runnable {
         boolean raw = (bs & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
         if (a == MotionEvent.ACTION_HOVER_EXIT) raw = false;
         long t = e.getEventTime();
+        if (a == MotionEvent.ACTION_DOWN) touching = true;
+        if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) touching = false;
         if (raw != rawHeld) { // the raw button state changed: start timing it
             rawHeld = raw;
             rawSince = t;
-            if (raw && web != null) web.postDelayed(this, BTN_CONFIRM_MS + 5); // re-check even if the pen then stays still
+            pressedInAir = raw && !touching; // where the press began decides how long it must last
+            if (raw && web != null) {  // re-check even if the pen then stays still
+                web.postDelayed(this, BTN_CONFIRM_MS + 5);
+                web.postDelayed(this, BTN_CONFIRM_TOUCH_MS + 5);
+            }
         }
         updateHeld(t);
         if (a == MotionEvent.ACTION_DOWN) nativeDriven = held;
@@ -128,7 +137,7 @@ public class MainActivity extends Activity implements Runnable {
 
     // a release counts at once; a press only after it has lasted BTN_CONFIRM_MS
     private void updateHeld(long now) {
-        boolean h = rawHeld && now - rawSince >= BTN_CONFIRM_MS;
+        boolean h = rawHeld && now - rawSince >= (pressedInAir ? BTN_CONFIRM_MS : BTN_CONFIRM_TOUCH_MS);
         if (h != held) {
             held = h;
             js("window.__penBtn&&window.__penBtn(" + h + ")");
