@@ -183,6 +183,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad or expired page link"})
         if not self._authed():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
+        if path == "/api/inbox":  # things Claude put on the tab (new pages, short notes); written by `sketch put --open` / `sketch note`
+            try:
+                items = json.loads((self.out_dir / "inbox.json").read_text())
+            except (OSError, ValueError):
+                items = []
+            return self._json(HTTPStatus.OK, {"items": items[-30:] if isinstance(items, list) else []})
         if path == "/api/pages":
             return self._json(HTTPStatus.OK, {"pages": list_pages(self.out_dir / "pages", self.token)})
         if path == "/":

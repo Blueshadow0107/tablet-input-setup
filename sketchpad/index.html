@@ -39,6 +39,12 @@
   #app.right #shapes, #app.right #sizepop { left: auto; right: calc(100% + 6px); }
   #sizepop { padding: 12px 14px; } #sizepop input { width: 150px; display: block; }
   #app.right #collapse svg { transform: scaleX(-1); }
+  #pagesbtn { position: relative; }
+  #pagesbtn.dot::after { content: ""; position: absolute; top: 5px; right: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bar); }
+  #note { position: fixed; z-index: 7; left: 50%; bottom: 74px; transform: translateX(-50%); max-width: min(92vw, 620px); display: flex; gap: 10px; align-items: center;
+    padding: 10px 12px 10px 16px; background: var(--bar); border: 1px solid var(--accent); border-radius: 14px; box-shadow: 0 8px 26px #000a; }
+  #notetext { flex: 1; line-height: 1.3; overflow-wrap: anywhere; }
+  #note button { min-height: 0; height: 36px; padding: 0 14px; border-radius: 10px; flex: none; }
   #pageframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--paper); }
   #top button.icon { width: 42px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; flex: none; }
   #top svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -119,6 +125,7 @@
   </div>
 </div>
 <div id="pagespop" hidden></div>
+<div id="note" hidden><span id="notetext"></span><button id="noteopen" class="send">Open</button><button id="noteclose" title="Dismiss">Dismiss</button></div>
 <div id="pick" hidden>
   <canvas id="wheel"></canvas>
   <div class="row"><span>Light</span><input id="lum" type="range" min="0" max="100" aria-label="Lightness"></div>
@@ -167,6 +174,7 @@ const HANDLE_R = 24;           // touch radius of the resize handles
 const UNDO_LIMIT = 200;
 const TAP_MS = 350, TAP_SLOP = 20; // multi-finger tap gestures
 const params = new URLSearchParams(location.search);
+const POLL_MS = +(params.get("poll") || 5000); // how often the tab looks for new things from Claude
 const token = params.get("t") || "", DEBUG = params.get("debug") === "1";
 
 // ---- state ----
@@ -293,6 +301,40 @@ $("pagesbtn").onclick = async () => {
   const r = $("pagesbtn").getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = r.left + "px"; pop.hidden = false;
 };
 document.addEventListener("pointerdown", e => { if (!$("pagespop").hidden && !$("pagespop").contains(e.target) && !$("pagesbtn").contains(e.target)) $("pagespop").hidden = true; }, true);
+
+// ---- inbox: new pages / notes from Claude (written by `sketch put --open` / `sketch note`), polled; shown as a dot on Pages + a banner ----
+const SEEN_KEY = "sketchpad.seenInbox";
+let seenId = null, queue = [];
+const saveSeen = () => { try { localStorage.setItem(SEEN_KEY, String(seenId)); } catch (_) { /* ignore */ } };
+function renderInbox() {
+  $("pagesbtn").classList.toggle("dot", queue.some(o => o.kind === "page"));
+  const n = queue[0];
+  $("note").hidden = !n;
+  if (!n) return;
+  $("notetext").textContent = n.kind === "page" ? "Claude put a page on the tab: " + (n.title || n.name) : n.text;
+  $("noteopen").hidden = n.kind !== "page";
+  $("noteopen").onclick = () => openInboxPage(n);
+  $("noteclose").onclick = () => markSeen(n.id);
+}
+function markSeen(id) { seenId = Math.max(seenId, id); saveSeen(); queue = queue.filter(o => o.id > seenId); renderInbox(); }
+async function openInboxPage(n) {
+  try {
+    const r = await fetch("/api/pages", { headers: { "X-Token": token } }), pg = (await r.json()).pages.find(q => q.name === n.name);
+    if (pg) showPage(pg.name, pg.path); else toast("That page is gone", "bad");
+  } catch (_) { toast("Could not open it", "bad"); }
+  markSeen(n.id);
+}
+async function pollInbox() {
+  if (document.hidden) return;
+  let items;
+  try { const r = await fetch("/api/inbox", { headers: { "X-Token": token } }); if (!r.ok) return; items = (await r.json()).items; } catch (_) { return; }
+  if (seenId === null) { // first run on this device: whatever is already there counts as seen
+    let v = null; try { v = localStorage.getItem(SEEN_KEY); } catch (_) { /* ignore */ }
+    seenId = v === null ? items.reduce((m, o) => Math.max(m, o.id), 0) : +v; saveSeen();
+  }
+  queue = items.filter(o => o.id > seenId).sort((a, b) => a.id - b.id); renderInbox();
+}
+setInterval(pollInbox, POLL_MS); pollInbox();
 
 // ---- cut / copy / paste of the selected objects (fills are not selectable, so they are not copied) ----
 const cloneObj = (o, d) => ({ ...mapObj(o, q => ({ x: q.x + d, y: q.y + d })), id: nextId++ });

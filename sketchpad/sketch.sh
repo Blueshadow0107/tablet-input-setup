@@ -7,7 +7,9 @@
 #                                     --open also launches it in the tab's browser. Needs `sketch start` once (loopback listener)
 #   sketch app [--rebuild]            the wrapper app on a USB-connected tab: build+install it if missing, forward the port, point it at the
 #                                     server (shell-only config channel) and launch it. --rebuild forces a fresh build + install
-#   sketch put <file.html|dir> [name] put a page on the tab (Pages button): it is shown behind the ink, in a sandboxed iframe
+#   sketch watch                      print one line per new Send, forever (run it under a Monitor so Claude is woken by every Send)
+#   sketch note "text"                a short message from Claude shows on the tab (dismissible banner)
+#   sketch put <file.html|dir> [name] [--open]   put a page on the tab (--open also tells the tab: dot on Pages + an Open banner) (Pages button): it is shown behind the ink, in a sandboxed iframe
 #   sketch compose [sketch-name]      render the page a sketch was drawn over and lay the ink on top -> <name>-over-page.png
 #   sketch rotate                     make a NEW token (old bookmarks stop working) and restart
 #   sketch latest                     print the newest saved sketch (png path + caption)
@@ -41,6 +43,35 @@ print_urls() {
   if grep -q -- '--also-lan' "$(dirname "$TOKEN_FILE")/env" 2>/dev/null; then
     [[ -n "$(lan_ip)" ]] && echo "lan:       http://$(lan_ip):$PORT/?t=$t  (plain HTTP: trusted Wi-Fi only)"
   fi
+}
+
+inbox_add() { # kind name text: append to <dir>/inbox.json, which the tab polls
+  python3 - "$DIR" "$1" "$2" "$3" <<'PY'
+import fcntl, json, os, re, sys, time
+d, kind, name, text = sys.argv[1:5]
+os.makedirs(d, exist_ok=True)
+lock = open(os.path.join(d, ".inbox.lock"), "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+path = os.path.join(d, "inbox.json")
+try:
+    items = json.load(open(path))
+except Exception:
+    items = []
+item = {"id": (items[-1]["id"] + 1) if items else 1, "kind": kind, "time": int(time.time())}
+if kind == "page":
+    item["name"] = name
+    try:
+        m = re.search(r"<title>(.*?)</title>", open(os.path.join(d, "pages", name, "index.html"), errors="replace").read()[:4000], re.I | re.S)
+        item["title"] = (m.group(1).strip() if m else name)[:80]
+    except OSError:
+        item["title"] = name
+else:
+    item["text"] = text[:600]
+items = (items + [item])[-100:]
+tmp = path + ".tmp"
+json.dump(items, open(tmp, "w"))
+os.replace(tmp, path)
+PY
 }
 
 cmd="${1:-status}"; shift || true
@@ -95,7 +126,26 @@ case "$cmd" in
     adb shell am start -n local.sketchpad/.MainActivity >/dev/null
     echo "app started on the tab (http://localhost:$PORT over the cable)"
     ;;
+  watch)
+    last="$(readlink -f "$DIR/latest.png" 2>/dev/null || true)"
+    while true; do
+      cur="$(readlink -f "$DIR/latest.png" 2>/dev/null || true)"
+      if [[ -n "$cur" && "$cur" != "$last" ]]; then
+        last="$cur"; n="$(basename "$cur" .png)"; sleep 0.6   # the page sidecar is written just after the PNG
+        cap=""; [[ -s "$DIR/$n.txt" ]] && cap="$(head -c 200 "$DIR/$n.txt" | tr '\n' ' ')"
+        over=""; [[ -f "$DIR/$n.json" ]] && over=" over-page=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["page"])' "$DIR/$n.json" 2>/dev/null)"
+        echo "new sketch $n$over caption: $cap"
+      fi
+      sleep 2
+    done
+    ;;
+  note)
+    [[ -n "${1:-}" ]] || { echo "usage: sketch note \"text\"" >&2; exit 2; }
+    inbox_add note "" "$*"; echo "note is on its way to the tab"
+    ;;
   put)
+    open=0; pargs=(); for a in "$@"; do if [[ "$a" == "--open" ]]; then open=1; else pargs+=("$a"); fi; done
+    set -- "${pargs[@]+"${pargs[@]}"}"
     src="${1:-}"; name="${2:-}"
     [[ -n "$src" && -e "$src" ]] || { echo "usage: sketch put <file.html|dir> [name]" >&2; exit 2; }
     if [[ -d "$src" ]]; then name="${name:-$(basename "$(cd "$src" && pwd)")}"; else name="${name:-$(basename "${src%.*}")}"; fi
@@ -103,7 +153,8 @@ case "$cmd" in
     dest="$DIR/pages/$name"; mkdir -p "$dest"
     if [[ -d "$src" ]]; then cp -a "$src"/. "$dest"/; else cp "$src" "$dest/index.html"; fi
     [[ -f "$dest/index.html" ]] || { echo "no index.html in $dest" >&2; exit 1; }
-    echo "page '$name' is on the tab: Pages button (top left). Keep it fit-to-screen, no scrolling, so the ink lines up."
+    if [[ "$open" == 1 ]]; then inbox_add page "$name" ""; echo "page '$name' is on the tab and the tab was told (dot on Pages + an Open banner)."
+    else echo "page '$name' is on the tab: Pages button (top left). Add --open to also notify. Keep it fit-to-screen, no scrolling, so the ink lines up."; fi
     ;;
   compose)
     cj="${1:-}"
@@ -141,6 +192,6 @@ case "$cmd" in
     ss -ltn "sport = :$PORT" 2>/dev/null | tail -n +2 | awk '{print "listening on", $4}'
     ;;
   *)
-    sed -n '2,17p' "$0"; exit 2
+    sed -n '2,20p' "$0"; exit 2
     ;;
 esac

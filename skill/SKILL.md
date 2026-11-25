@@ -12,8 +12,22 @@ The user draws on their Galaxy Tab S7 FE (wrapper app or browser); Send saves a 
 - If the sketch was drawn over a page, `sketch latest` also prints `…-over-page.png`: **Read that one**, it is the page with their ink on top. The raw PNG is transparent ink only.
 - Handwriting is often sideways (they write with the tab turned): rotate in your head, don't ask.
 
+## Tab-first rule (the user wants the tablet to be the main place)
+They want to switch only between the **sketchpad and chat, and chat only when really needed**. So:
+- **Wake on Send.** When a sketchpad session starts, run `sketch watch` under the Monitor tool (persistent). Every Send prints `new sketch <name> [over-page=<page>] caption: ...` and wakes you: no "check my sketch" needed.
+- **Answer on the tab.** Respond with `sketch put … --open` and/or `sketch note "…"`. In chat say at most one short line (e.g. "answered on the tab") unless something truly needs the chat: a decision that needs words, a failure, or a question the tab can't carry.
+- **If the watcher isn't running** (new session, Monitor not started), start it first, then carry on.
+- If a Send arrives that you can't act on, put a `sketch note` saying so (don't leave them waiting on a blank tab).
+
+## The loop (one tab, one workflow)
+The user's own flowchart: **idea → they draw → they Send (either a reply over one of my pages, or a fresh idea) → I build → I show it back on the tab → they mark it up / ask questions → Send again.**
+1. Read the sketch (`sketch latest`). If it has an `…-over-page.png`, it is a reply to that page: say what you're answering.
+2. Build or revise the page, `sketch put <dir|file> <name> --open`: the tab shows a dot on Pages and an **Open** banner (never auto-opens, so a page never lands mid-stroke).
+3. Questions or comments for them: `sketch note "short text"` shows as a dismissible banner. Keep notes short (one or two sentences, max 600 chars); put anything long in the page itself.
+4. They Send again; repeat. Re-use the same page name to revise in place.
+
 ## Putting something on the tab
-1. Write a self-contained page: `~/tablet-sketches/pages/<name>/index.html` (+ css/js/images beside it), or write a file anywhere and run `sketch put <file.html|dir> [name]`.
+1. Write a self-contained page in a scratch dir, then `sketch put <file.html|dir> [name] --open` (without `--open` it still appears under Pages, but the tab isn't told).
 2. It appears under the **Pages** button (top left of the app). They can Draw on it with the pen, or switch to **Use** (taps and scrolling go to the page, e.g. a quiz or a calculator).
 3. Page rules, because ink is positioned in screen pixels:
    - **Fit the screen, no scrolling.** Use `100vw/100vh`, flex/grid, `overflow: hidden`. Landscape is about 1204×731 CSS px, portrait about 731×1204 (the real size is in the sketch's `.json` sidecar as `viewport`).
