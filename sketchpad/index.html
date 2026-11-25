@@ -81,7 +81,10 @@
   #wheel { position: static; inset: auto; touch-action: none; border-radius: 50%; cursor: crosshair; }
   #pick .row { display: flex; gap: 8px; align-items: center; width: 100%; }
   #pick input[type=range] { flex: 1; width: auto; }
-  #hex { width: 96px; font-family: monospace; }
+  #hex { width: 84px; font-family: monospace; }
+  #dropper { width: 40px; height: 40px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; flex: none; }
+  #dropper svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  body.dropping canvas { cursor: copy; } body.dropping #wrap { outline: 2px dashed var(--accent); outline-offset: -4px; }
   #hsl { font: 12px monospace; color: var(--accent); min-width: 12ch; white-space: nowrap; }
   #pickprev { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--edge); flex: none; }
   input[type=range] { width: 96px; accent-color: var(--accent); }
@@ -143,7 +146,7 @@
 <div id="pick" hidden>
   <canvas id="wheel"></canvas>
   <div class="row"><span>Light</span><input id="lum" type="range" min="0" max="100" aria-label="Lightness"></div>
-  <div class="row"><span id="pickprev"></span><input id="hex" type="text" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Hex colour"><span id="hsl"></span></div>
+  <div class="row"><span id="pickprev"></span><button id="dropper" title="Eyedropper: tap a colour on your drawing" aria-label="Eyedropper"></button><input id="hex" type="text" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Hex colour"><span id="hsl"></span></div>
   <button id="pickok">Done</button>
 </div>
 <div id="toast" role="status"></div>
@@ -185,6 +188,7 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   unlock: SVG('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.5-1.5"/>'),
   paper: SVG('<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M9.3 4v16M14.7 4v16M4 9.3h16M4 14.7h16"/>'),
   refresh: SVG('<path d="M20 12a8 8 0 11-2.6-5.9"/><path d="M20 4v6h-6"/>'),
+  dropper: SVG('<path d="M15 4l5 5"/><path d="M17.5 6.5L8 16l-1 4 4-1 9.5-9.5a2.1 2.1 0 00-3-3z"/>'),
   pages: SVG('<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>'),
   draw: SVG('<path d="M4 20l1-4L16.5 4.5a2 2 0 013 3L8 19z"/><path d="M14 7l3 3"/>'),
   use: SVG('<path d="M9 13V5.5a1.5 1.5 0 013 0V11M12 11V4.5a1.5 1.5 0 013 0V12M15 11.5V7a1.5 1.5 0 013 0v7c0 4-2.5 6-6 6s-4.5-1.5-6.5-4.5L3.5 13.5a1.5 1.5 0 012.3-1.9L9 14"/>'),
@@ -277,13 +281,26 @@ $("lum").addEventListener("input", e => { hsl.l = +e.target.value; applyCustom()
 $("hex").addEventListener("input", e => { const v = e.target.value.trim().replace(/^#?/, "#"); if (/^#[0-9a-f]{6}$/i.test(v)) { hsl = hexToHsl(v.toLowerCase()); applyCustom(v.toLowerCase()); } });
 const closePick = () => { $("pick").hidden = true; };
 $("pickok").onclick = closePick;
-customBtn.onclick = () => {
-  if (!$("pick").hidden) return closePick();
+function openPick() {
   $("pick").hidden = false; const r = customBtn.getBoundingClientRect(), p = $("pick");
   p.style.top = Math.max(8, Math.min(innerHeight - p.offsetHeight - 8, r.top - 20)) + "px"; // beside the panel, on whichever side it is
   p.style.left = ($("app").classList.contains("right") ? Math.max(8, r.left - p.offsetWidth - 8) : Math.min(innerWidth - p.offsetWidth - 8, r.right + 8)) + "px";
   applyCustom(color === customBtn.dataset.hex ? color : (customBtn.dataset.hex || CUSTOM_START));
-};
+}
+customBtn.onclick = () => $("pick").hidden ? openPick() : closePick();
+// Eyedropper (in the colour menu): the menu steps aside, your next tap on the canvas takes that colour, then the menu comes back showing it.
+let dropping = false;
+$("dropper").innerHTML = ICON.dropper;
+function stopDropping() { dropping = false; document.body.classList.remove("dropping"); }
+$("dropper").onclick = () => { closePick(); dropping = true; document.body.classList.add("dropping"); toast("Tap a colour on your drawing (tap a button to cancel)"); };
+function dropColor(e) {
+  const r = cv.getBoundingClientRect(), d = dpr(), x = Math.round((e.clientX - r.left) * d), y = Math.round((e.clientY - r.top) * d);
+  const q = bctx.getImageData(Math.max(0, Math.min(base.width - 1, x)), Math.max(0, Math.min(base.height - 1, y)), 1, 1).data;
+  if (q[3] < 255) return toast("Nothing to pick there: a page's own picture is a separate layer", "bad"); // over a page the ink layer is see-through
+  const hex = "#" + [q[0], q[1], q[2]].map(v => v.toString(16).padStart(2, "0")).join("");
+  stopDropping(); hsl = hexToHsl(hex); applyCustom(hex); openPick(); toast("Picked " + hex);
+}
+document.addEventListener("pointerdown", e => { if (dropping && !cv.contains(e.target) && e.target !== cv && !$("dropper").contains(e.target)) stopDropping(); }, true); // tapping anything else cancels
 document.addEventListener("pointerdown", e => { if (!$("pick").hidden && !$("pick").contains(e.target) && e.target !== customBtn) closePick(); }, true);
 function makeRow(el, list, onPick) {
   list.forEach(([key, label]) => { const b = document.createElement("button"); b.innerHTML = ICON[key] || label; b.title = label; b.setAttribute("aria-label", label); b.dataset.k = key; b.onclick = () => onPick(key); el.appendChild(b); });
@@ -876,6 +893,7 @@ function onUp(e) {
   }
 }
 cv.addEventListener("pointerdown", e => {
+  if (dropping) { e.preventDefault(); dropColor(e); return; }
   if (e.pointerType === "pen") { clearTimeout(toggleT); toggleT = 0; penArmed = false; } // the pen landed: whatever looked like a button tap was just light contact
   dbg(e, "down"); // a pen landing always starts a stroke: its pressure can't tell a plain tip from the button (plain tips measured 0.0059, 0.0112 too)
   if (e.pointerType === "touch") {
