@@ -42,7 +42,7 @@
   #app.right #collapse svg { transform: scaleX(-1); }
   #pagesbtn { position: relative; }
   #pagesbtn.dot::after { content: ""; position: absolute; top: 5px; right: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bar); }
-  #note { position: fixed; z-index: 7; left: 50%; bottom: 74px; transform: translateX(-50%); max-width: min(92vw, 620px); display: flex; gap: 10px; align-items: center;
+  #note { touch-action: none; cursor: grab; position: fixed; z-index: 7; left: 50%; bottom: 74px; transform: translateX(-50%); max-width: min(92vw, 620px); display: flex; gap: 10px; align-items: center;
     padding: 10px 12px 10px 16px; background: var(--bar); border: 1px solid var(--accent); border-radius: 14px; box-shadow: 0 8px 26px #000a; }
   #notetext { flex: 1; line-height: 1.3; overflow-wrap: anywhere; }
   #note button { min-height: 0; height: 36px; padding: 0 14px; border-radius: 10px; flex: none; }
@@ -370,7 +370,30 @@ function renderInbox() {
   $("noteopen").hidden = n.kind !== "page";
   $("noteopen").onclick = () => openInboxPage(n);
   $("noteclose").onclick = () => markSeen(n.id);
+  applyNotePos();
 }
+// The banner can be dragged out of the way with a finger or the pen (not from its buttons); where you leave it is remembered.
+const NOTE_POS_KEY = "sketchpad.notepos";
+let notePos = null, noteDrag = null;
+try { notePos = JSON.parse(localStorage.getItem(NOTE_POS_KEY) || "null"); } catch (_) { /* ignore */ }
+function placeNote(x, y) {
+  const el = $("note"), w = el.offsetWidth, h = el.offsetHeight;
+  x = Math.max(6, Math.min(innerWidth - w - 6, x)); y = Math.max(6, Math.min(innerHeight - h - 6, y));
+  Object.assign(el.style, { left: x + "px", top: y + "px", bottom: "auto", transform: "none" });
+  return { x, y };
+}
+function applyNotePos() { if (notePos && !$("note").hidden) placeNote(notePos.fx * innerWidth, notePos.fy * innerHeight); }
+$("note").addEventListener("pointerdown", e => {
+  if (e.target.closest("button")) return;
+  const r = $("note").getBoundingClientRect(); noteDrag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top };
+  try { $("note").setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capturable pointer */ }
+});
+$("note").addEventListener("pointermove", e => {
+  if (!noteDrag || e.pointerId !== noteDrag.id) return;
+  const q = placeNote(e.clientX - noteDrag.dx, e.clientY - noteDrag.dy); notePos = { fx: q.x / innerWidth, fy: q.y / innerHeight };
+});
+const endNoteDrag = e => { if (!noteDrag || e.pointerId !== noteDrag.id) return; noteDrag = null; try { localStorage.setItem(NOTE_POS_KEY, JSON.stringify(notePos)); } catch (_) { /* ignore */ } };
+$("note").addEventListener("pointerup", endNoteDrag); $("note").addEventListener("pointercancel", endNoteDrag);
 function markSeen(id) { seenId = Math.max(seenId, id); queue = queue.filter(o => o.id > seenId); renderInbox(); }
 function adoptBlank(name) { // blank paper turned into a page: its ink moves into the page (the page itself carries the paper it had)
   if (activePage === name) return;
