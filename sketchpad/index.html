@@ -72,6 +72,8 @@ const PAPER = "#fbfaf6", ACCENT = "#7c3aed";
 const MAX_EXPORT = 2000;       // longest side of the sent PNG
 const HOLD_MS = 550;           // hold the pen still this long to snap a stroke to a line
 const STRAIGHT_MAX_DEV = 0.12; // snap only if the stroke is this close to straight (fraction of its length)
+const PEN_MIN_P = 0.03;        // below this pen pressure the tip is NOT touching: the S Pen side button shows up as buttons=1 with ~0 pressure
+const LIGHT_TOUCH_MS = 150;    // a pointerdown with ~0 pressure that gains pressure this fast is a gentle touch, not "button then touch"
 const HANDLE_R = 24;           // touch radius of the resize handles
 const UNDO_LIMIT = 200;
 const TAP_MS = 350, TAP_SLOP = 20; // multi-finger tap gestures
@@ -84,6 +86,7 @@ const base = document.createElement("canvas"), bctx = base.getContext("2d"); // 
 const $ = id => document.getElementById(id);
 let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
+let airBtn = false, airDownT = 0; // S Pen side button held with the tip off the screen; airDownT = when it began, if it arrived as a pointerdown
 const dpr = () => window.devicePixelRatio || 1;
 
 // ---- toolbar ----
@@ -249,14 +252,18 @@ function redo() { if (!redoStack.length) return toast("Nothing to redo", "bad");
 function deleteSel() { if (!sel.size) return; commit(objects.filter(o => !sel.has(o.id))); sel.clear(); updateUI(); present(); }
 
 // ---- pointer input ----
-const isPenErase = e => e.pointerType === "pen" && (!!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // eraser end or side button
-const inContact = e => e.pointerType !== "pen" || e.pressure > 0 || !!(e.buttons & 1) || !!(e.buttons & 32);
+// On the S Pen in Chrome the side button is NOT a separate button: it arrives as buttons=1 with ~0 pressure while hovering,
+// and a real tip touch also has buttons=1. So "touching" is decided by pressure, never by the button bit.
+const penTouching = e => e.pressure >= PEN_MIN_P || !!(e.buttons & 32);
+const inContact = e => e.pointerType !== "pen" || penTouching(e);
+const isPenErase = e => e.pointerType === "pen" && (airBtn || !!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // side button, or an eraser end / barrel button where reported
 const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
 
 function startStroke(e) {
+  if (airBtn && airDownT && performance.now() - airDownT < LIGHT_TOUCH_MS) { airBtn = false; airDownT = 0; } // gentle touch, not button-then-touch
   const p = pt(e), t = isPenErase(e) ? "eraser" : tool, size = +$("size").value;
   try { cv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capturable pointer */ }
-  const b = { pid: e.pointerId, ptype: e.pointerType, color, size };
+  const b = { pid: e.pointerId, ptype: e.pointerType, color, size, viaBtn: e.pointerType === "pen" && airBtn }; // viaBtn: ends when the tip lifts or the button is released
   if (t === "pen") { cur = { ...b, mode: "pen", pts: [p] }; armHold(); }
   else if (t === "shapes") cur = { ...b, mode: "shape", kind: shapeKind, a: p, b: p };
   else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(10, size * 2.5) }; eraseAt(p); }
@@ -296,14 +303,20 @@ function trySnap() {
 }
 function cancelCur() { clearTimeout(holdT); cur = null; hidden.clear(); rebase(); present(); }
 
+function trackPenButton(e, fromDown) { // maintain airBtn: side button held, tip off the screen
+  if (!e.buttons) { airBtn = false; airDownT = 0; }
+  else if (!cur && !penTouching(e)) { if (!airBtn) airDownT = fromDown ? performance.now() : 0; airBtn = true; }
+}
 function onMove(e) {
   if (e.pointerType === "touch") gMove(e);
+  if (e.pointerType === "pen") trackPenButton(e);
   dbg(e, "move");
-  if (!cur) { // pen pressed down while the side button was already held: the button press consumed the pointerdown
-    if (e.pointerType === "pen" && inContact(e) && e.buttons && !(e.pointerType === "touch")) startStroke(e);
+  if (!cur) { // tip touched while the side button was already held (no pointerdown is sent), or pointerdown came in with ~0 pressure
+    if (e.pointerType === "pen" && penTouching(e) && e.buttons) startStroke(e);
     return;
   }
   if (e.pointerId !== cur.pid) return;
+  if (cur.viaBtn && !penTouching(e)) { onUp(e); airBtn = !!e.buttons; return; } // tip lifted (button may still be held) or button released
   const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   for (const ev of (evs.length ? evs : [e])) step(pt(ev));
 }
@@ -326,6 +339,7 @@ function step(p) {
 }
 function onUp(e) {
   if (e.pointerType === "touch") gUp(e);
+  if (e.pointerType === "pen" && !e.buttons) airBtn = false;
   dbg(e, "up");
   if (!cur || e.pointerId !== cur.pid) return;
   clearTimeout(holdT);
@@ -354,6 +368,7 @@ function onUp(e) {
   }
 }
 cv.addEventListener("pointerdown", e => {
+  if (e.pointerType === "pen") trackPenButton(e, true);
   dbg(e, "down");
   if (e.pointerType === "touch") {
     gDown(e);
@@ -365,7 +380,7 @@ cv.addEventListener("pointerdown", e => {
 });
 cv.addEventListener("pointermove", onMove);
 cv.addEventListener("pointerup", onUp);
-cv.addEventListener("pointercancel", e => { dbg(e, "cancel"); if (cur && e.pointerId === cur.pid) cancelCur(); if (e.pointerType === "touch") touches.delete(e.pointerId); });
+cv.addEventListener("pointercancel", e => { dbg(e, "cancel"); if (e.pointerType === "pen") airBtn = false; if (cur && e.pointerId === cur.pid) cancelCur(); if (e.pointerType === "touch") touches.delete(e.pointerId); });
 cv.addEventListener("contextmenu", e => { e.preventDefault(); dbg(e, "ctxmenu"); });
 
 // ---- multi-finger tap gestures: 2 fingers = undo, 3 = redo ----
@@ -381,8 +396,10 @@ function gUp(e) {
 let lastDbg = "";
 function dbg(e, tag) {
   if (!DEBUG) return;
-  const key = `${tag}|${e.pointerType}|${e.button}|${e.buttons}`, msg = `${key}|p=${(e.pressure || 0).toFixed(2)}`;
-  $("dbg").hidden = false; $("dbg").textContent = `${tag} ${e.pointerType} button=${e.button} buttons=${e.buttons} p=${(e.pressure || 0).toFixed(2)}`;
+  const touching = e.pointerType !== "pen" || penTouching(e);
+  const key = `${tag}|${e.pointerType}|${e.button}|${e.buttons}|${touching ? "touch" : "air"}|air=${airBtn}|cur=${cur ? cur.mode : "-"}`;
+  const msg = `${key}|p=${(e.pressure || 0).toFixed(4)}`;
+  $("dbg").hidden = false; $("dbg").textContent = `${tag} ${e.pointerType} buttons=${e.buttons} p=${(e.pressure || 0).toFixed(3)} ${touching ? "touching" : "in air"}${airBtn ? " BUTTON" : ""} ${cur ? cur.mode : ""}`;
   if (key === lastDbg) return; lastDbg = key;
   fetch("/api/debug", { method: "POST", body: msg, headers: { "X-Token": token }, keepalive: true }).catch(() => {});
 }
