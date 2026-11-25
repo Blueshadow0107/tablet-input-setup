@@ -22,11 +22,14 @@ import android.widget.TextView;
  * Pen events are logged (adb logcat -s sketchpad) before the web engine sees them, so we can tell what
  * Chromium hides from the page, e.g. the S Pen side button held down while touching.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements Runnable {
+    // The grip can brush the S Pen button: it flickers on for 60-800 ms at zero pressure. A press only counts once it has been down this long.
+    private static final long BTN_CONFIRM_MS = 110;
     private static final String TAG = "sketchpad";
     private WebView web;
     private int lastButtons = -1;
-    private boolean held = false, nativeDriven = false;
+    private boolean held = false, nativeDriven = false, rawHeld = false;
+    private long rawSince = 0;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -104,12 +107,15 @@ public class MainActivity extends Activity {
             lastButtons = bs;
             Log.d(TAG, "pen action=" + MotionEvent.actionToString(a) + " buttons=" + bs + " pressure=" + e.getPressure());
         }
-        boolean h = (bs & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
-        if (a == MotionEvent.ACTION_HOVER_EXIT) h = false;
-        if (h != held) {
-            held = h;
-            js("window.__penBtn&&window.__penBtn(" + h + ")");
+        boolean raw = (bs & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
+        if (a == MotionEvent.ACTION_HOVER_EXIT) raw = false;
+        long t = e.getEventTime();
+        if (raw != rawHeld) { // the raw button state changed: start timing it
+            rawHeld = raw;
+            rawSince = t;
+            if (raw && web != null) web.postDelayed(this, BTN_CONFIRM_MS + 5); // re-check even if the pen then stays still
         }
+        updateHeld(t);
         if (a == MotionEvent.ACTION_DOWN) nativeDriven = held;
         if (nativeDriven) {
             int phase = a == MotionEvent.ACTION_DOWN ? 0 : (a == MotionEvent.ACTION_MOVE ? 1 : (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL ? 2 : -1));
@@ -118,6 +124,20 @@ public class MainActivity extends Activity {
                 if (phase == 2) nativeDriven = false;
             }
         }
+    }
+
+    // a release counts at once; a press only after it has lasted BTN_CONFIRM_MS
+    private void updateHeld(long now) {
+        boolean h = rawHeld && now - rawSince >= BTN_CONFIRM_MS;
+        if (h != held) {
+            held = h;
+            js("window.__penBtn&&window.__penBtn(" + h + ")");
+        }
+    }
+
+    @Override
+    public void run() {
+        updateHeld(android.os.SystemClock.uptimeMillis());
     }
 
     @Override

@@ -45,6 +45,7 @@
     padding: 10px 12px 10px 16px; background: var(--bar); border: 1px solid var(--accent); border-radius: 14px; box-shadow: 0 8px 26px #000a; }
   #notetext { flex: 1; line-height: 1.3; overflow-wrap: anywhere; }
   #note button { min-height: 0; height: 36px; padding: 0 14px; border-radius: 10px; flex: none; }
+  #erasebadge { position: absolute; z-index: 3; top: 10px; right: 10px; padding: 6px 12px; border-radius: 999px; background: #d12e4f; color: #fff; font-weight: 700; letter-spacing: .08em; font-size: 13px; pointer-events: none; box-shadow: 0 4px 14px #0007; }
   #pageframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--paper); }
   #top button.icon { width: 42px; height: 38px; min-height: 0; padding: 0; display: grid; place-items: center; border-radius: 10px; flex: none; }
   #top svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -118,6 +119,7 @@
       <div class="grp row2"><button id="flip" title="Move the panel to the other side"></button><button id="collapse" title="Hide the panel"></button></div>
     </aside>
   <div id="wrap"><canvas id="c"></canvas>
+    <div id="erasebadge" hidden>ERASE</div>
     <div id="selbar" hidden>
       <button id="selcut" title="Cut"></button><button id="selcopy" title="Copy"></button><button id="selpaste" title="Paste"></button><button id="seldel" class="danger" title="Delete"></button>
     </div></div>
@@ -557,7 +559,8 @@ const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - 
 // (0 down, 1 move, 2 up) for a stroke that STARTED with the button held (Chromium hides those touches from the page). Hover-based tap detection is then switched off.
 let nativePen = /SketchpadApp/.test(navigator.userAgent), nativeHeld = false, heldAt = 0, heldContact = false, heldLatch = false;
 window.__penBtn = down => {
-  nativePen = true; clearTimeout(toggleT); toggleT = 0;
+  nativePen = true; $("erasebadge").hidden = !down; // shows the moment the app counts the button as held, so an accidental press is visible before the tip lands
+  clearTimeout(toggleT); toggleT = 0;
   if (down) {
     nativeHeld = true; heldAt = performance.now(); heldContact = false; heldLatch = false;
     if (cur && cur.mode === "pen") { heldContact = true; heldLatch = true; ignoreHeld = true; switchPenToErase(); } // pressed mid-stroke: keep the ink, erase the rest
