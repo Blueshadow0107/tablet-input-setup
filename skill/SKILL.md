@@ -27,6 +27,9 @@ The user's own flowchart: **idea → they draw → they Send (either a reply ove
 3. Questions or comments for them: `sketch note "short text"` shows as a dismissible banner. Keep notes short (one or two sentences, max 600 chars); put anything long in the page itself.
 4. They Send again; repeat. Re-use the same page name to revise in place.
 
+## Ink and pages
+Blank paper and every page keep their own ink. A Send over a page is that page's ink only (see `over-page=<page>` in the watcher line). The user writes with the tab in landscape but the text turned a quarter turn (reads bottom-to-top): expect sideways handwriting and rotate it in your head.
+
 ## Putting something on the tab
 1. Write a self-contained page in a scratch dir, then `sketch put <file.html|dir> [name] --open` (without `--open` it still appears under Pages, but the tab isn't told).
 2. It appears under the **Pages** button (top left of the app). They can Draw on it with the pen, or switch to **Use** (taps and scrolling go to the page, e.g. a quiz or a calculator).

@@ -95,7 +95,7 @@
 <div id="app">
   <div id="top">
     <button id="pagesbtn" class="icon" title="Pages: put something behind your ink"></button>
-    <button id="paperbtn" class="icon" title="Paper: blank / dots / grid / lines (tap to change)"></button>
+    <button id="paperbtn" class="icon" title="Paper: blank / dots / lines (tap to change)"></button>
     <button id="rotbtn" class="icon" title="Rotate: lock the screen to portrait or landscape (tap to cycle)" hidden></button>
     <button id="modebtn" class="icon" title="Draw / Use: pen draws, or taps go to the page" hidden></button>
     <button id="zoompct" class="icon" title="Zoom: tap to reset to 100%" hidden></button>
@@ -150,7 +150,7 @@ const FILL_TOL = 150;          // bucket fill: how far (sum of R+G+B differences
 const ZOOM_MIN = 0.5, ZOOM_MAX = 8; // pinch / wheel zoom limits
 const GESTURE_DECIDE_PX = 14;       // two fingers must move this far before the gesture is decided: pinch (zoom) or drag together (pan)
 const GESTURE_BOTH_PX = 6, GESTURE_ONE_PX = 90; // ...and BOTH fingers must have moved a little (each finger reports separately), unless one has clearly moved far
-const PAPER_STYLES = ["blank", "dots", "grid", "lines"]; // built-in paper: drawn in world space, so it fills the canvas at any zoom/pan and in the sent image
+const PAPER_STYLES = ["blank", "dots", "lines"]; // built-in paper (blank only; a page is its own background): drawn in world space, so it fills the canvas at any zoom/pan and in the sent image. Lines run VERTICALLY: the user writes with the page turned a quarter turn
 const PAPER_STEP = 32, PAPER_INK = "#b8b0cc", PAPER_DOT = 1.7;
 const PASTE_OFFSET = 24;       // each paste lands this many px down-right of the last one, so copies don't hide the original
 const PEN_LIFT_GUARD_MS = 150; // no side-button toggle this soon after the pen last touched (a lifting tip reports buttons=1 with tiny pressure)
@@ -330,7 +330,15 @@ const frame = document.createElement("iframe");
 frame.id = "pageframe"; frame.setAttribute("sandbox", "allow-scripts"); frame.hidden = true; wrap.insertBefore(frame, cv);
 $("pagesbtn").innerHTML = ICON.pages;
 function setMode(use) { useMode = use; cv.style.pointerEvents = use ? "none" : ""; $("modebtn").innerHTML = use ? ICON.use : ICON.draw; $("modebtn").classList.toggle("on", use); $("modebtn").title = use ? "Use: taps go to the page (tap for Draw)" : "Draw: the pen draws (tap for Use)"; }
+const store = {}; // ink per page: "" is blank paper. Each keeps its own objects and undo history, so nothing gets tangled between pages
+function switchInk(name) {
+  store[activePage] = { objects, undo: undoStack, redo: redoStack };
+  const t = store[name] || { objects: [], undo: [], redo: [] };
+  objects = t.objects; undoStack = t.undo; redoStack = t.redo; sel.clear(); hidden.clear(); cur = null;
+}
 function showPage(name, path) { // path = the short-lived /p/<capability>/<name>/ link the server minted in /api/pages (never the long-lived token)
+  if (name !== activePage) switchInk(name);
+  $("paperbtn").hidden = !!name; // paper is a blank-paper thing; a page is its own background
   activePage = name; frame.hidden = !name; frame.src = name ? path : "about:blank";
   $("modebtn").hidden = !name; setMode(false); viewChanged();
 }
@@ -553,8 +561,7 @@ function drawPaperPattern(c, x0, y0, x1, y1, hair) { // hair: width of a hairlin
     c.fill();
   } else {
     c.strokeStyle = PAPER_INK; c.lineWidth = hair; c.globalAlpha = 0.7; c.beginPath();
-    for (let y = ay; y <= y1; y += st) { c.moveTo(x0, y); c.lineTo(x1, y); }
-    if (paperStyle === "grid") for (let x = ax; x <= x1; x += st) { c.moveTo(x, y0); c.lineTo(x, y1); }
+    for (let x = ax; x <= x1; x += st) { c.moveTo(x, y0); c.lineTo(x, y1); }
     c.stroke();
   }
   c.restore();
@@ -604,9 +611,16 @@ function fit() {
 }
 
 // ---- history ----
-// the canvas is saved on the device after every change and restored on load, so a reload (or the app restarting) never loses unsent work
-const CANVAS_KEY = "sketchpad.canvas"; let saveT = 0;
-function saveCanvas() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(CANVAS_KEY, JSON.stringify(objects)); } catch (_) { /* too big or no storage: skip */ } }, 400); }
+// the canvas (every page's ink) is saved on the device after every change and restored on load, so a reload (or the app restarting) never loses unsent work
+const CANVAS_KEY = "sketchpad.canvas2"; let saveT = 0;
+function saveCanvas() {
+  clearTimeout(saveT);
+  saveT = setTimeout(() => {
+    const all = {}; for (const [k, v] of Object.entries(store)) all[k] = v.objects;
+    all[activePage] = objects;
+    try { localStorage.setItem(CANVAS_KEY, JSON.stringify(all)); } catch (_) { /* too big or no storage: skip */ }
+  }, 400);
+}
 function afterChange() {
   saveCanvas();
   const ids = new Set(objects.map(o => o.id));
@@ -899,9 +913,13 @@ $("send").onclick = async () => {
 };
 
 new ResizeObserver(fit).observe(wrap);
-try { // restore the saved canvas
-  const saved = JSON.parse(localStorage.getItem(CANVAS_KEY) || "[]");
-  if (Array.isArray(saved) && saved.length) { objects = saved; nextId = Math.max(nextId, ...saved.map(o => (+o.id || 0) + 1)); }
+try { // restore the saved canvas: { pageName: [objects], "": blank paper }; the old single-list format belongs to blank paper
+  let saved = JSON.parse(localStorage.getItem(CANVAS_KEY) || "null");
+  if (saved === null) { const old = JSON.parse(localStorage.getItem("sketchpad.canvas") || "[]"); saved = { "": Array.isArray(old) ? old : [] }; }
+  let maxId = 0;
+  for (const [k, list] of Object.entries(saved)) if (Array.isArray(list)) { for (const o of list) maxId = Math.max(maxId, +o.id || 0); if (k !== "") store[k] = { objects: list, undo: [], redo: [] }; }
+  if (Array.isArray(saved[""])) objects = saved[""];
+  nextId = Math.max(nextId, maxId + 1);
 } catch (_) { /* unreadable: start empty */ }
 updateUI(); fit();
 </script>
