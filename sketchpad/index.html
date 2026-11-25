@@ -178,8 +178,6 @@ const UNDO_LIMIT = 200;
 const TAP_MS = 350, TAP_SLOP = 20; // multi-finger tap gestures
 const params = new URLSearchParams(location.search);
 const POLL_MS = +(params.get("poll") || 5000); // how often the tab looks for new things from Claude
-const BANNER_MS = +(params.get("banner") || 60000); // a banner hides itself after this long (a note counts as read; a page keeps its dot)
-const ITEM_TTL_S = +(params.get("ttl") || 600);    // anything older than this is stale: it counts as seen, never shown after a refresh
 const token = params.get("t") || "", DEBUG = params.get("debug") === "1";
 
 // ---- state ----
@@ -308,23 +306,19 @@ $("pagesbtn").onclick = async () => {
 document.addEventListener("pointerdown", e => { if (!$("pagespop").hidden && !$("pagespop").contains(e.target) && !$("pagesbtn").contains(e.target)) $("pagespop").hidden = true; }, true);
 
 // ---- inbox: new pages / notes from Claude (written by `sketch put --open` / `sketch note`), polled; shown as a dot on Pages + a banner ----
-const SEEN_KEY = "sketchpad.seenInbox";
-let seenId = null, queue = [], bannerT = 0;
-const quiet = new Set(); // page items whose banner timed out (the dot stays)
-const saveSeen = () => { try { localStorage.setItem(SEEN_KEY, String(seenId)); } catch (_) { /* ignore */ } };
+// A banner stays until you dismiss it (or open the page). A refresh clears whatever is left: each load starts from "everything already there is seen".
+let seenId = null, queue = [];
 function renderInbox() {
   $("pagesbtn").classList.toggle("dot", queue.some(o => o.kind === "page"));
-  const n = queue.find(o => !quiet.has(o.id));
+  const n = queue[0];
   $("note").hidden = !n;
-  clearTimeout(bannerT);
   if (!n) return;
-  bannerT = setTimeout(() => { if (n.kind === "note") markSeen(n.id); else { quiet.add(n.id); renderInbox(); } }, BANNER_MS);
   $("notetext").textContent = n.kind === "page" ? "Claude put a page on the tab: " + (n.title || n.name) : n.text;
   $("noteopen").hidden = n.kind !== "page";
   $("noteopen").onclick = () => openInboxPage(n);
   $("noteclose").onclick = () => markSeen(n.id);
 }
-function markSeen(id) { seenId = Math.max(seenId, id); saveSeen(); queue = queue.filter(o => o.id > seenId); renderInbox(); }
+function markSeen(id) { seenId = Math.max(seenId, id); queue = queue.filter(o => o.id > seenId); renderInbox(); }
 async function openInboxPage(n) {
   try {
     const r = await fetch("/api/pages", { headers: { "X-Token": token } }), pg = (await r.json()).pages.find(q => q.name === n.name);
@@ -334,15 +328,11 @@ async function openInboxPage(n) {
 }
 async function pollInbox() {
   if (document.hidden) return;
-  let items, now = 0;
-  try { const r = await fetch("/api/inbox", { headers: { "X-Token": token } }); if (!r.ok) return; const j = await r.json(); items = j.items; now = j.now || 0; } catch (_) { return; }
-  if (seenId === null) { // first run on this device: whatever is already there counts as seen
-    let v = null; try { v = localStorage.getItem(SEEN_KEY); } catch (_) { /* ignore */ }
-    seenId = v === null ? items.reduce((m, o) => Math.max(m, o.id), 0) : +v; saveSeen();
-  }
-  if (now) for (const o of items) if (now - o.time > ITEM_TTL_S && o.id > seenId) { seenId = o.id; saveSeen(); } // stale ones are dropped, oldest first
-  const next = items.filter(o => o.id > seenId).sort((a, b) => a.id - b.id);
-  if (next.map(o => o.id).join() !== queue.map(o => o.id).join()) { queue = next; renderInbox(); } // don't restart the banner timer on every poll
+  let items;
+  try { const r = await fetch("/api/inbox", { headers: { "X-Token": token } }); if (!r.ok) return; items = (await r.json()).items; } catch (_) { return; }
+  if (seenId === null) seenId = items.reduce((m, o) => Math.max(m, o.id), 0); // first poll of this load: what is already there counts as seen
+  const next = items.filter(o => o.id > seenId).sort((x, y) => x.id - y.id);
+  if (next.map(o => o.id).join() !== queue.map(o => o.id).join()) { queue = next; renderInbox(); }
 }
 setInterval(pollInbox, POLL_MS); pollInbox();
 

@@ -23,6 +23,7 @@ They want to switch only between the **sketchpad and chat, and chat only when re
 The user's own flowchart: **idea → they draw → they Send (either a reply over one of my pages, or a fresh idea) → I build → I show it back on the tab → they mark it up / ask questions → Send again.**
 1. Read the sketch (`sketch latest`). If it has an `…-over-page.png`, it is a reply to that page: say what you're answering.
 2. Build or revise the page, `sketch put <dir|file> <name> --open`: the tab shows a dot on Pages and an **Open** banner (never auto-opens, so a page never lands mid-stroke).
+3. Banners stay until dismissed, but a **refresh clears them** (the app reload from `sketch app` counts): send notes/pages after the tab has loaded, not just before relaunching it.
 3. Questions or comments for them: `sketch note "short text"` shows as a dismissible banner. Keep notes short (one or two sentences, max 600 chars); put anything long in the page itself.
 4. They Send again; repeat. Re-use the same page name to revise in place.
 
