@@ -5,6 +5,8 @@
 #   sketch url                        print the URL for each network the server can be reached on
 #   sketch usb [--open]               tab on a USB cable (adb): forward its localhost:5099 to the laptop, print that URL;
 #                                     --open also launches it in the tab's browser. Needs `sketch start` once (loopback listener)
+#   sketch app [--rebuild]            the wrapper app on a USB-connected tab: build+install it if missing, forward the port, point it at the
+#                                     server (shell-only config channel) and launch it. --rebuild forces a fresh build + install
 #   sketch rotate                     make a NEW token (old bookmarks stop working) and restart
 #   sketch latest                     print the newest saved sketch (png path + caption)
 #   sketch status                     is it running, and where it listens
@@ -75,6 +77,22 @@ case "$cmd" in
     echo "usb: $url"
     if [[ "${1:-}" == "--open" ]]; then adb shell am start -a android.intent.action.VIEW -d "'$url'" >/dev/null; fi
     ;;
+  app)
+    case "${1:-}" in ""|--rebuild) ;; *) echo "sketch app: unknown option '$1' (only --rebuild)" >&2; exit 2 ;; esac
+    command -v adb >/dev/null || { echo "adb not found" >&2; exit 1; }
+    adb devices | awk 'NR>1 && $2=="device"{f=1} END{exit !f}' || { echo "no authorised device on adb (plug the tab straight into the laptop, USB debugging on, accept the prompt)" >&2; exit 1; }
+    systemctl --user is-active --quiet "$UNIT" || { echo "server is not running: sketch start" >&2; exit 1; }
+    grep -q -- '--loopback' "$(dirname "$TOKEN_FILE")/env" 2>/dev/null || { echo "server has no loopback listener yet: run sketch start once" >&2; exit 1; }
+    appdir="$(cd "$(dirname "$(readlink -f "$0")")/../app" && pwd)"
+    if [[ "${1:-}" == "--rebuild" ]] || ! adb shell pm list packages 2>/dev/null | grep -q 'package:local.sketchpad'; then
+      echo "building and installing the app..." >&2
+      "$appdir/build.sh" install >/dev/null
+    fi
+    adb reverse "tcp:$PORT" "tcp:$PORT" >/dev/null
+    adb shell am broadcast -f 32 -n local.sketchpad/.ConfigReceiver --es url "'http://localhost:$PORT/?t=$(token)'" >/dev/null
+    adb shell am start -n local.sketchpad/.MainActivity >/dev/null
+    echo "app started on the tab (http://localhost:$PORT over the cable)"
+    ;;
   rotate)
     new_token
     systemctl --user restart "$UNIT"
@@ -91,6 +109,6 @@ case "$cmd" in
     ss -ltn "sport = :$PORT" 2>/dev/null | tail -n +2 | awk '{print "listening on", $4}'
     ;;
   *)
-    sed -n '2,13p' "$0"; exit 2
+    sed -n '2,15p' "$0"; exit 2
     ;;
 esac

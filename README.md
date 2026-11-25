@@ -16,6 +16,7 @@ sketch start                    # serve on Tailscale AND the Wi-Fi address (defa
 sketch start --tailscale-only   # no LAN listener (use on open/shared Wi-Fi)
 sketch url                      # print the URLs again
 sketch rotate                   # new token (old bookmarks die) and restart
+sketch app [--rebuild]              # the wrapper app on a USB-connected tab: installs it if missing, points it at the server, launches it
 sketch usb [--open]              # tab on a USB cable: adb-forwards its localhost:5099 to the laptop (no network at all); --open launches it on the tab
 sketch latest         # path + caption of the newest sketch
 sketch stop
