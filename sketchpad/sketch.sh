@@ -34,7 +34,18 @@ case "$cmd" in
     mode="${1:-}"
     envfile="$(dirname "$TOKEN_FILE")/env"
     mkdir -p "$(dirname "$envfile")"
-    if [[ "$mode" == "--lan" ]]; then echo "SKETCHPAD_ARGS=--lan" >"$envfile"; else : >"$envfile"; fi
+    if [[ "$mode" == "--lan" ]]; then
+      lan_ip="$(host_for --lan)"
+      [[ -n "$lan_ip" ]] || { echo "no LAN address found" >&2; exit 1; }
+      # bind to the one Wi-Fi address, not every interface
+      echo "SKETCHPAD_ARGS=--host $lan_ip" >"$envfile"
+      echo "WARNING: --lan is plain HTTP. On open/shared Wi-Fi the token and sketches can be sniffed. Prefer Tailscale; keep sessions short." >&2
+    else
+      : >"$envfile"
+    fi
+    # fresh token every start, so an old (possibly sniffed) link stops working
+    mkdir -p "$(dirname "$TOKEN_FILE")"
+    (umask 077; head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' >"$TOKEN_FILE")
     systemctl --user restart "$UNIT"
     sleep 1
     systemctl --user is-active --quiet "$UNIT" || { journalctl --user -u "$UNIT" -n 5 --no-pager; exit 1; }
