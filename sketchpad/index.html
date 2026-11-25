@@ -254,7 +254,6 @@ function deleteSel() { if (!sel.size) return; commit(objects.filter(o => !sel.ha
 // On the S Pen in Chrome the side button is NOT a separate button: it arrives as buttons=1 with ~0 pressure while hovering,
 // and a real tip touch also has buttons=1. So "touching" is decided by pressure, never by the button bit.
 const penTouching = e => e.pressure >= PEN_MIN_P || !!(e.buttons & 32);
-const inContact = e => e.pointerType !== "pen" || penTouching(e);
 const isPenErase = e => e.pointerType === "pen" && (airBtn || !!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // side button, or an eraser end / barrel button where reported
 const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
 
@@ -344,6 +343,7 @@ function onUp(e) {
   const c = cur; cur = null;
   switch (c.mode) {
     case "pen":
+      if (!c.snapped && c.pts.length <= 2 && Math.max(...c.pts.map(q => q.p)) < 0.01) { present(); break; } // ~0-pressure down/up glitch from a button press, not ink
       if (c.snapped) commit([...objects, { id: nextId++, type: "shape", kind: "line", color: c.color, size: c.size, a: c.pts[0], b: c.pts[1] }]);
       else commit([...objects, { id: nextId++, type: "stroke", color: c.color, size: c.size, pts: c.pts }]);
       break;
@@ -366,19 +366,16 @@ function onUp(e) {
   }
 }
 cv.addEventListener("pointerdown", e => {
-  if (e.pointerType === "pen") trackPenButton(e);
-  dbg(e, "down");
+  dbg(e, "down"); // airBtn is deliberately NOT updated here: a plain tip landing also arrives with buttons=1 and ~0 pressure, so only hover moves may set it
   if (e.pointerType === "touch") {
     gDown(e);
     if (touches.size >= 2 && cur && cur.ptype === "touch" && !cur.viaBtn) cancelCur(); // second finger: it's a gesture, not a stroke
     if (!fingerOK || touches.size >= 2) return;
   }
   if (cur) return;
-  // With the side button held the pen reports almost no pressure (0.0002 rising to ~0.04), but a pen pointerdown with buttons=1 is still the tip landing:
-  // normal touches begin at 0.08+, so a pointerdown below PEN_MIN_P means "button + tip" -> erase now, no pressure needed.
-  if (e.pointerType === "pen" && !penTouching(e)) { if (e.buttons & 1) { airBtn = true; startStroke(e, true); } return; }
-  if (!inContact(e)) return;
-  startStroke(e);
+  // The pressure at pointerdown can't tell a plain tip from button+tip (plain tips measured 0.0059, 0.0112 too), so pen contact ALWAYS starts a stroke.
+  // It erases only if the side button was already seen held in the air (hover moves with buttons=1) or the pen reports an eraser/barrel button.
+  startStroke(e, e.pointerType === "pen");
 });
 cv.addEventListener("pointermove", onMove);
 cv.addEventListener("pointerup", onUp);
