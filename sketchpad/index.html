@@ -85,7 +85,12 @@ const base = document.createElement("canvas"), bctx = base.getContext("2d"); // 
 const $ = id => document.getElementById(id);
 let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
-let airBtn = false; // S Pen side button held: seen as buttons=1 with ~0 pressure (a hover move, or a pointerdown with ~0 pressure when the tip lands with the button already down)
+// S Pen side button = TAP TO TOGGLE Pen <-> Eraser. On Samsung + Chrome the only reliable signals are: a hover move with buttons=1 and ~0 pressure (button
+// pressed in the air), and a contextmenu in the middle of a stroke. Holding the button while touching is useless: Chromium's stylus text selector swallows
+// those touches before the page sees them.
+let airBtn = false;           // the button is currently seen held in the air (rising edge = one toggle)
+let ignoreHeld = false;       // the press already acted mid-stroke; ignore the "still held" hover that follows the lift
+let prevTool = "pen", lastToggle = 0;
 const dpr = () => window.devicePixelRatio || 1;
 
 // ---- toolbar ----
@@ -254,13 +259,18 @@ function deleteSel() { if (!sel.size) return; commit(objects.filter(o => !sel.ha
 // On the S Pen in Chrome the side button is NOT a separate button: it arrives as buttons=1 with ~0 pressure while hovering,
 // and a real tip touch also has buttons=1. So "touching" is decided by pressure, never by the button bit.
 const penTouching = e => e.pressure >= PEN_MIN_P || !!(e.buttons & 32);
-const isPenErase = e => e.pointerType === "pen" && (airBtn || !!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // side button, or an eraser end / barrel button where reported
+const isPenErase = e => e.pointerType === "pen" && (!!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // a pen that DOES report an eraser end / barrel button (the S Pen doesn't)
+function togglePenTool() { // the S Pen button tap
+  const now = performance.now(); if (now - lastToggle < 250) return; lastToggle = now;
+  if (tool === "eraser") setTool(prevTool); else { prevTool = tool; setTool("eraser"); }
+  toast(tool === "eraser" ? "Eraser (tap the pen button for " + (prevTool === "select" ? "Select" : prevTool) + ")" : "Back to " + tool);
+}
 const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
 
-function startStroke(e, viaDown = false) { // viaDown: began on a real pointerdown, so it ends on pointerup, not on a pressure drop
+function startStroke(e) {
   const p = pt(e), t = isPenErase(e) ? "eraser" : tool, size = +$("size").value;
   try { cv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capturable pointer */ }
-  const b = { pid: e.pointerId, ptype: e.pointerType, color, size, viaBtn: e.pointerType === "pen" && airBtn, viaDown }; // viaBtn: erasing because the side button is held
+  const b = { pid: e.pointerId, ptype: e.pointerType, color, size };
   if (t === "pen") { cur = { ...b, mode: "pen", pts: [p] }; armHold(); }
   else if (t === "shapes") cur = { ...b, mode: "shape", kind: shapeKind, a: p, b: p };
   else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(14, size * 3) }; eraseAt(p); }
@@ -300,20 +310,17 @@ function trySnap() {
 }
 function cancelCur() { clearTimeout(holdT); cur = null; hidden.clear(); rebase(); present(); }
 
-function trackPenButton(e) { // maintain airBtn: side button held, tip not (yet) pressing
-  if (!e.buttons) airBtn = false;
-  else if (!cur && !penTouching(e)) airBtn = true;
+function trackPenButton(e) { // hover moves only: a rising edge of the side button (buttons=1, tip not pressing, no stroke in progress) toggles Pen/Eraser once
+  if (!e.buttons) { airBtn = false; ignoreHeld = false; return; }
+  if (cur || penTouching(e) || airBtn) return;
+  airBtn = true;
+  if (!ignoreHeld) togglePenTool();
 }
 function onMove(e) {
   if (e.pointerType === "touch") gMove(e);
   if (e.pointerType === "pen") trackPenButton(e);
   dbg(e, "move");
-  if (!cur) { // tip touched while the side button was already held (no pointerdown is sent), or pointerdown came in with ~0 pressure
-    if (e.pointerType === "pen" && penTouching(e) && e.buttons) startStroke(e);
-    return;
-  }
-  if (e.pointerId !== cur.pid) return;
-  if (cur.viaBtn && e.pointerType === "pen" && (!e.buttons || (!cur.viaDown && !penTouching(e)))) { onUp(e); airBtn = !!e.buttons; return; } // tip lifted / button released (a stroke that began on a pointerdown just waits for pointerup, since pressure is unreliable while the button is held)
+  if (!cur || e.pointerId !== cur.pid) return;
   const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   for (const ev of (evs.length ? evs : [e])) step(pt(ev));
 }
@@ -366,28 +373,26 @@ function onUp(e) {
   }
 }
 cv.addEventListener("pointerdown", e => {
-  dbg(e, "down"); // airBtn is deliberately NOT updated here: a plain tip landing also arrives with buttons=1 and ~0 pressure, so only hover moves may set it
+  dbg(e, "down"); // a pen landing always starts a stroke: its pressure can't tell a plain tip from the button (plain tips measured 0.0059, 0.0112 too)
   if (e.pointerType === "touch") {
     gDown(e);
-    if (touches.size >= 2 && cur && cur.ptype === "touch" && !cur.viaBtn) cancelCur(); // second finger: it's a gesture, not a stroke
+    if (touches.size >= 2 && cur && cur.ptype === "touch") cancelCur(); // second finger: it's a gesture, not a stroke
     if (!fingerOK || touches.size >= 2) return;
   }
   if (cur) return;
-  // The pressure at pointerdown can't tell a plain tip from button+tip (plain tips measured 0.0059, 0.0112 too), so pen contact ALWAYS starts a stroke.
-  // It erases only if the side button was already seen held in the air (hover moves with buttons=1) or the pen reports an eraser/barrel button.
-  startStroke(e, e.pointerType === "pen");
+  startStroke(e);
 });
 cv.addEventListener("pointermove", onMove);
 cv.addEventListener("pointerup", onUp);
 cv.addEventListener("pointercancel", e => {
   dbg(e, "cancel"); if (e.pointerType === "pen") airBtn = false;
-  if (cur && e.pointerId === cur.pid) { if (cur.viaBtn) onUp(e); else cancelCur(); } // Android often cancels the button-tip touch: keep what was erased
+  if (cur && e.pointerId === cur.pid) cancelCur();
   if (e.pointerType === "touch") touches.delete(e.pointerId);
 });
 cv.addEventListener("contextmenu", e => {
   e.preventDefault(); dbg(e, "ctxmenu");
-  // Pressing the side button in the middle of a pen stroke reaches Chrome only as a contextmenu event: keep the ink so far, erase from here
-  if (e.pointerType === "pen" && cur && cur.mode === "pen" && !cur.viaBtn) switchPenToErase();
+  // Pressing the side button in the middle of a pen stroke reaches Chrome only as a contextmenu event: keep the ink so far, switch to the Eraser, erase from here
+  if (e.pointerType === "pen" && cur && cur.mode === "pen") { ignoreHeld = true; switchPenToErase(); }
 });
 function switchPenToErase() {
   const c = cur, last = c.pts[c.pts.length - 1];
@@ -395,9 +400,9 @@ function switchPenToErase() {
   const id = nextId++;
   commit(c.snapped ? [...objects, { id, type: "shape", kind: "line", color: c.color, size: c.size, a: c.pts[0], b: c.pts[1] }]
                    : [...objects, { id, type: "stroke", color: c.color, size: c.size, pts: c.pts }]);
-  airBtn = true;
+  if (tool !== "eraser") { prevTool = tool; setTool("eraser"); toast("Eraser (tap the pen button for " + prevTool + ")"); }
   // protect: the eraser starts exactly where that ink ends, so don't let it delete what was just written
-  cur = { pid: c.pid, ptype: "pen", color: c.color, size: c.size, viaBtn: true, viaDown: true, mode: "erase", pts: [last], hit: new Set(), r: Math.max(14, c.size * 3), protect: id };
+  cur = { pid: c.pid, ptype: "pen", color: c.color, size: c.size, mode: "erase", pts: [last], hit: new Set(), r: Math.max(14, c.size * 3), protect: id };
   eraseAt(last); present();
 }
 

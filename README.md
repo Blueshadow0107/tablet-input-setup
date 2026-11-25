@@ -23,7 +23,7 @@ Then tell Claude "check my latest sketch". It reads `~/tablet-sketches/latest.pn
 
 - **Pen only by default.** Finger and palm touches are ignored; the *Finger* button turns finger drawing on.
 - **Tools.** Pen (pressure-sensitive), Shapes (line, arrow, rectangle, ellipse), Eraser (removes a whole stroke or shape per touch, sweeping the path so a fast flick can't skip it) and Select.
-- **S Pen side button = erase.** Hold it while drawing and the Pen tool erases for that stroke; the pen's eraser end does the same. Mouse right-click does not.
+- **S Pen side button = tap to toggle Pen ↔ Eraser.** Tap it while hovering (or press it mid-stroke: the ink so far is kept and the rest of the stroke erases) and the tool flips; tap again to go back to the tool you had (Select too). Holding the button while touching can't work: Chromium swallows button-held touches, so no events reach the page. Samsung's Air Command may also pop up on a tap (it's a global setting, not per-site). The pen's eraser end erases directly. Mouse right-click does not.
 - **Hold to straighten.** Pause the pen at the end of a stroke that is already nearly straight (within 12% of its length) and it snaps to a line that follows the pen until you lift.
 - **Select.** Draw a lasso around things, drag inside the box to move them, drag a corner to resize, *Delete* to remove. Tapping outside clears the selection.
 - **Undo / redo.** Buttons, plus a two-finger tap (undo) and three-finger tap (redo). *Clear* is undoable. Moves, resizes, erases and deletes are each one undo step.
