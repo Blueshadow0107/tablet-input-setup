@@ -7,6 +7,8 @@
 #                                     --open also launches it in the tab's browser. Needs `sketch start` once (loopback listener)
 #   sketch app [--rebuild]            the wrapper app on a USB-connected tab: build+install it if missing, forward the port, point it at the
 #                                     server (shell-only config channel) and launch it. --rebuild forces a fresh build + install
+#   sketch put <file.html|dir> [name] put a page on the tab (Pages button): it is shown behind the ink, in a sandboxed iframe
+#   sketch compose [sketch-name]      render the page a sketch was drawn over and lay the ink on top -> <name>-over-page.png
 #   sketch rotate                     make a NEW token (old bookmarks stop working) and restart
 #   sketch latest                     print the newest saved sketch (png path + caption)
 #   sketch status                     is it running, and where it listens
@@ -93,6 +95,34 @@ case "$cmd" in
     adb shell am start -n local.sketchpad/.MainActivity >/dev/null
     echo "app started on the tab (http://localhost:$PORT over the cable)"
     ;;
+  put)
+    src="${1:-}"; name="${2:-}"
+    [[ -n "$src" && -e "$src" ]] || { echo "usage: sketch put <file.html|dir> [name]" >&2; exit 2; }
+    if [[ -d "$src" ]]; then name="${name:-$(basename "$(cd "$src" && pwd)")}"; else name="${name:-$(basename "${src%.*}")}"; fi
+    [[ "$name" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || { echo "page name must be letters, digits, . _ - (max 64): '$name'" >&2; exit 2; }
+    dest="$DIR/pages/$name"; mkdir -p "$dest"
+    if [[ -d "$src" ]]; then cp -a "$src"/. "$dest"/; else cp "$src" "$dest/index.html"; fi
+    [[ -f "$dest/index.html" ]] || { echo "no index.html in $dest" >&2; exit 1; }
+    echo "page '$name' is on the tab: Pages button (top left). Keep it fit-to-screen, no scrolling, so the ink lines up."
+    ;;
+  compose)
+    cj="${1:-}"
+    if [[ -z "$cj" ]]; then cj="$(find "$DIR" -maxdepth 1 -name '2*.json' -printf '%f\n' 2>/dev/null | sort | tail -n1)"; cj="${cj%.json}"; fi
+    [[ -n "$cj" && -f "$DIR/$cj.json" ]] || { echo "no sketch drawn over a page yet" >&2; exit 1; }
+    read -r page vp < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["page"], d["viewport"])' "$DIR/$cj.json")
+    [[ -f "$DIR/pages/$page/index.html" ]] || { echo "page '$page' no longer exists in $DIR/pages" >&2; exit 1; }
+    CHROME="${CHROME:-$(find "$HOME/.cache/ms-playwright" -maxdepth 3 -path '*chromium-*/chrome-linux64/chrome' -type f 2>/dev/null | sort | tail -n1)}"
+    [[ -x "$CHROME" ]] || CHROME="$(command -v chromium google-chrome chrome 2>/dev/null | head -n1 || true)"
+    [[ -x "$CHROME" ]] || { echo "no headless Chrome/Chromium found (set CHROME=...)" >&2; exit 1; }
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 --screenshot="$tmp/page.png" \
+      --window-size="${vp/x/,}" "file://$DIR/pages/$page/index.html" >/dev/null 2>&1
+    [[ -s "$tmp/page.png" ]] || { echo "could not render the page" >&2; exit 1; }
+    ink_dim="$(magick identify -format '%wx%h' "$DIR/$cj.png")"
+    magick "$tmp/page.png" -resize "${ink_dim}!" "$DIR/$cj.png" -compose over -composite "$DIR/$cj-over-page.png"
+    echo "$DIR/$cj-over-page.png"
+    echo "page: $page ($vp)"
+    ;;
   rotate)
     new_token
     systemctl --user restart "$UNIT"
@@ -102,6 +132,8 @@ case "$cmd" in
   latest)
     [[ -e "$DIR/latest.png" ]] || { echo "no sketches yet in $DIR" >&2; exit 1; }
     readlink -f "$DIR/latest.png"
+    lname="$(basename "$(readlink -f "$DIR/latest.png")" .png)"
+    if [[ -f "$DIR/$lname.json" ]]; then echo "drawn over a page:"; "$0" compose "$lname" || true; fi
     [[ -s "$DIR/latest.txt" ]] && { echo "caption: $(cat "$DIR/latest.txt")"; } || true
     ;;
   status)
@@ -109,6 +141,6 @@ case "$cmd" in
     ss -ltn "sport = :$PORT" 2>/dev/null | tail -n +2 | awk '{print "listening on", $4}'
     ;;
   *)
-    sed -n '2,15p' "$0"; exit 2
+    sed -n '2,17p' "$0"; exit 2
     ;;
 esac
