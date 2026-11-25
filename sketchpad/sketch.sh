@@ -160,7 +160,7 @@ case "$cmd" in
     cj="${1:-}"
     if [[ -z "$cj" ]]; then cj="$(find "$DIR" -maxdepth 1 -name '2*.json' -printf '%f\n' 2>/dev/null | sort | tail -n1)"; cj="${cj%.json}"; fi
     [[ -n "$cj" && -f "$DIR/$cj.json" ]] || { echo "no sketch drawn over a page yet" >&2; exit 1; }
-    read -r page vp < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["page"], d["viewport"])' "$DIR/$cj.json")
+    read -r page vp org scl < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["page"], d["viewport"], d.get("origin", "0,0"), d.get("scale", 1))' "$DIR/$cj.json")
     [[ -f "$DIR/pages/$page/index.html" ]] || { echo "page '$page' no longer exists in $DIR/pages" >&2; exit 1; }
     CHROME="${CHROME:-$(find "$HOME/.cache/ms-playwright" -maxdepth 3 -path '*chromium-*/chrome-linux64/chrome' -type f 2>/dev/null | sort | tail -n1)}"
     [[ -x "$CHROME" ]] || CHROME="$(command -v chromium google-chrome chrome 2>/dev/null | head -n1 || true)"
@@ -170,7 +170,9 @@ case "$cmd" in
       --window-size="${vp/x/,}" "file://$DIR/pages/$page/index.html" >/dev/null 2>&1
     [[ -s "$tmp/page.png" ]] || { echo "could not render the page" >&2; exit 1; }
     ink_dim="$(magick identify -format '%wx%h' "$DIR/$cj.png")"
-    magick "$tmp/page.png" -resize "${ink_dim}!" "$DIR/$cj.png" -compose over -composite "$DIR/$cj-over-page.png"
+    # the ink PNG may extend past the page (ink written outside the canvas after zoom/pan): put the page at its place inside the ink image
+    read -r pw ph px py < <(python3 -c 'import sys; vw, vh = map(float, sys.argv[1].split("x")); ox, oy = map(float, sys.argv[2].split(",")); k = float(sys.argv[3]); print(round(vw * k), round(vh * k), round(-ox * k), round(-oy * k))' "$vp" "$org" "$scl")
+    magick -size "$ink_dim" xc:'#fbfaf6' \( "$tmp/page.png" -resize "${pw}x${ph}!" \) -geometry "$(printf '%+d%+d' "$px" "$py")" -compose over -composite "$DIR/$cj.png" -compose over -composite "$DIR/$cj-over-page.png"
     echo "$DIR/$cj-over-page.png"
     echo "page: $page ($vp)"
     ;;

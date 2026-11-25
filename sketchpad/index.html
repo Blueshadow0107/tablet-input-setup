@@ -180,6 +180,7 @@ const ICON = { // inline icons, 24x24 grid, stroked with the button's text colou
   flip: SVG('<path d="M7 8h12l-3-3M17 16H5l3 3"/>'), collapse: SVG('<path d="M15 5l-7 7 7 7"/>'), reopen: SVG('<path d="M15 5l-7 7 7 7"/>'),
 };
 const MAX_EXPORT = 2000;       // longest side of the sent PNG
+const EXPORT_PAD = 24;         // margin around ink that lies outside the original canvas (after zoom/pan you can write past its edge)
 const HOLD_MS = 550;           // hold the pen still this long to snap a stroke to a line
 const STRAIGHT_MAX_DEV = 0.12; // snap only if the stroke is this close to straight (fraction of its length)
 const PEN_MIN_P = 0.03;        // below this pen pressure the tip is NOT touching: the S Pen side button shows up as buttons=1 with ~0 pressure
@@ -569,7 +570,11 @@ function fit() {
 }
 
 // ---- history ----
+// the canvas is saved on the device after every change and restored on load, so a reload (or the app restarting) never loses unsent work
+const CANVAS_KEY = "sketchpad.canvas"; let saveT = 0;
+function saveCanvas() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(CANVAS_KEY, JSON.stringify(objects)); } catch (_) { /* too big or no storage: skip */ } }, 400); }
 function afterChange() {
+  saveCanvas();
   const ids = new Set(objects.map(o => o.id));
   for (const id of [...sel]) if (!ids.has(id)) sel.delete(id);
   hidden.clear(); rebase(); present(); updateUI();
@@ -836,16 +841,20 @@ function toast(msg, kind = "ok") {
 }
 $("send").onclick = async () => {
   if (!objects.length) return toast("Nothing drawn yet", "bad");
-  const r = wrap.getBoundingClientRect(), k = Math.min(1, MAX_EXPORT / Math.max(r.width, r.height));
-  const out = document.createElement("canvas"); out.width = Math.round(r.width * k); out.height = Math.round(r.height * k);
+  // The sent image covers the original canvas AND any ink outside it (zoom/pan lets you write past its edge), never the zoom itself.
+  const r = wrap.getBoundingClientRect(), ink = bboxOf(objects.filter(o => o.type !== "fill"));
+  let x0 = 0, y0 = 0, x1 = r.width, y1 = r.height;
+  if (ink) { x0 = Math.min(0, ink.x0 - EXPORT_PAD); y0 = Math.min(0, ink.y0 - EXPORT_PAD); x1 = Math.max(r.width, ink.x1 + EXPORT_PAD); y1 = Math.max(r.height, ink.y1 + EXPORT_PAD); }
+  const W = x1 - x0, H = y1 - y0, k = Math.min(1, MAX_EXPORT / Math.max(W, H));
+  const out = document.createElement("canvas"); out.width = Math.round(W * k); out.height = Math.round(H * k);
   const oc = out.getContext("2d"); if (!activePage) { oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height); } // over a page the PNG is transparent ink only
-  oc.scale(k, k); for (const o of objects) drawObj(oc, o);
+  oc.scale(k, k); oc.translate(-x0, -y0); for (const o of objects) drawObj(oc, o);
   const blob = await new Promise(res => out.toBlob(res, "image/png"));
   $("send").disabled = true;
   try {
     const resp = await fetch("/api/sketch", { method: "POST", body: blob,
       headers: { "X-Token": token, "Content-Type": "image/png", "X-Caption": encodeURIComponent($("cap").value),
-        ...(activePage ? { "X-Page": activePage, "X-Viewport": Math.round(r.width) + "x" + Math.round(r.height) } : {}) } });
+        ...(activePage ? { "X-Page": activePage, "X-Viewport": Math.round(r.width) + "x" + Math.round(r.height), "X-Origin": x0.toFixed(1) + "," + y0.toFixed(1), "X-Scale": k.toFixed(4) } : {}) } });
     const j = await resp.json();
     if (!resp.ok) throw new Error(j.error || resp.status);
     toast("Sent " + j.name); $("cap").value = "";
@@ -854,6 +863,10 @@ $("send").onclick = async () => {
 };
 
 new ResizeObserver(fit).observe(wrap);
+try { // restore the saved canvas
+  const saved = JSON.parse(localStorage.getItem(CANVAS_KEY) || "[]");
+  if (Array.isArray(saved) && saved.length) { objects = saved; nextId = Math.max(nextId, ...saved.map(o => (+o.id || 0) + 1)); }
+} catch (_) { /* unreadable: start empty */ }
 updateUI(); fit();
 </script>
 </body>

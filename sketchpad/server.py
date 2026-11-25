@@ -34,6 +34,8 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_CAPTION = 2000
 PAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 VIEWPORT = re.compile(r"^\d{2,5}x\d{2,5}$")
+ORIGIN = re.compile(r"^-?\d{1,6}(\.\d)?,-?\d{1,6}(\.\d)?$")  # where the sent image's top-left sits, in canvas px (negative = ink left of / above the canvas)
+SCALE = re.compile(r"^\d(\.\d{1,4})?$")
 # Pages are plain files written by Claude into <sketch dir>/pages/<name>/ (index.html + assets). They run in a sandboxed iframe with NO same-origin
 # access (CSP sandbox + the iframe's own sandbox attribute), so a page can run scripts but cannot read the token or call the sketchpad API.
 # A page can only load its own files (+ data:/blob:), cannot fetch/XHR/WebSocket anywhere, cannot post forms or change <base>: even a page that
@@ -244,7 +246,11 @@ class Handler(BaseHTTPRequestHandler):
         name = save_sketch(self.out_dir, png, caption)
         page, vp = self.headers.get("X-Page", ""), self.headers.get("X-Viewport", "")
         if page and PAGE_NAME.match(page) and VIEWPORT.match(vp):  # ink drawn over a page: remember which page and at what size, so it can be composited later
-            (self.out_dir / f"{name}.json").write_text(json.dumps({"page": page, "viewport": vp, "ink": f"{name}.png"}))
+            meta = {"page": page, "viewport": vp, "ink": f"{name}.png"}
+            org, scl = self.headers.get("X-Origin", ""), self.headers.get("X-Scale", "")
+            if ORIGIN.match(org) and SCALE.match(scl):
+                meta["origin"], meta["scale"] = org, float(scl)
+            (self.out_dir / f"{name}.json").write_text(json.dumps(meta))
         print(f"saved {name} ({len(png)} bytes, caption {len(caption)} chars)", file=sys.stderr, flush=True)
         self._json(HTTPStatus.OK, {"ok": True, "name": name})
 
