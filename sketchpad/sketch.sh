@@ -8,6 +8,7 @@
 #   sketch app [--rebuild]            the wrapper app on a USB-connected tab: build+install it if missing, forward the port, point it at the
 #                                     server (shell-only config channel) and launch it. --rebuild forces a fresh build + install
 #   sketch watch                      print one line per new Send, forever (run it under a Monitor so Claude is woken by every Send)
+#   sketch image <file> [name]        a picture for the CANVAS (banner: Add to canvas): Fill, move and resize work on it, unlike a page
 #   sketch note "text"                a short message from Claude shows on the tab (dismissible banner)
 #   sketch put <file.html|dir> [name] [--open|--adopt]   put a page on the tab (--open also tells the tab: dot on Pages + an Open banner;
 #                                     --adopt = promote: when Open is tapped, the blank paper's ink moves into this page. Make the page carry the paper it had) (Pages button): it is shown behind the ink, in a sandboxed iframe
@@ -59,7 +60,9 @@ try:
 except Exception:
     items = []
 item = {"id": (items[-1]["id"] + 1) if items else 1, "kind": kind, "time": int(time.time())}
-if kind == "page":
+if kind == "image":
+    item["name"] = name
+elif kind == "page":
     item["name"] = name
     if adopt:
         item["adopt"] = True   # on Open, the blank paper's ink moves into this page
@@ -142,6 +145,14 @@ case "$cmd" in
       sleep 2
     done
     ;;
+  image)
+    src="${1:-}"; name="${2:-}"
+    [[ -n "$src" && -f "$src" ]] || { echo "usage: sketch image <file.png|jpg|webp> [name]" >&2; exit 2; }
+    name="${name:-$(basename "$src")}"
+    [[ "$name" =~ ^[A-Za-z0-9_.-]{1,80}\.(png|jpg|jpeg|webp)$ ]] || { echo "image name must be letters, digits, . _ - and end in .png/.jpg/.webp: '$name'" >&2; exit 2; }
+    mkdir -p "$DIR/images"; cp "$src" "$DIR/images/$name"
+    inbox_add image "$name" ""; echo "picture '$name' is on its way: the tab shows an 'Add to canvas' banner (it lands on the canvas, so Fill, move and resize work on it)"
+    ;;
   note)
     [[ -n "${1:-}" ]] || { echo "usage: sketch note \"text\"" >&2; exit 2; }
     inbox_add note "" "$*"; echo "note is on its way to the tab"
@@ -197,6 +208,6 @@ case "$cmd" in
     ss -ltn "sport = :$PORT" 2>/dev/null | tail -n +2 | awk '{print "listening on", $4}'
     ;;
   *)
-    sed -n '2,21p' "$0"; exit 2
+    sed -n '2,22p' "$0"; exit 2
     ;;
 esac

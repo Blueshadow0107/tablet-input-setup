@@ -32,6 +32,7 @@ DEFAULT_PORT = 5099
 MAX_BYTES = 12 * 1024 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_CAPTION = 2000
+IMAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,80}\.(png|jpg|jpeg|webp)$", re.I)  # pictures Claude puts ON the canvas (`sketch image`): drawn into the ink layer, so Fill/move/resize work on them
 PAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 VIEWPORT = re.compile(r"^\d{2,5}x\d{2,5}$")
 ORIGIN = re.compile(r"^-?\d{1,6}(\.\d)?,-?\d{1,6}(\.\d)?$")  # where the sent image's top-left sits, in canvas px (negative = ink left of / above the canvas)
@@ -185,6 +186,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad or expired page link"})
         if not self._authed():
             return self._json(HTTPStatus.UNAUTHORIZED, {"error": "bad token"})
+        m = re.match(r"^/img/([^/]+)$", path)
+        if m:
+            name = unquote(m.group(1))
+            f = self.out_dir / "images" / name
+            if not IMAGE_NAME.match(name) or not f.is_file():
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return self._send(HTTPStatus.OK, f.read_bytes(), mimetypes.guess_type(name)[0] or "application/octet-stream")
         if path == "/api/inbox":  # things Claude put on the tab (new pages, short notes); written by `sketch put --open` / `sketch note`
             try:
                 items = json.loads((self.out_dir / "inbox.json").read_text())

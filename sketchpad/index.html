@@ -386,9 +386,10 @@ function renderInbox() {
   const n = queue[0];
   $("note").hidden = !n;
   if (!n) return;
-  $("notetext").textContent = n.kind === "page" ? "Claude put a page on the tab: " + (n.title || n.name) : n.text;
-  $("noteopen").hidden = n.kind !== "page";
-  $("noteopen").onclick = () => openInboxPage(n);
+  $("notetext").textContent = n.kind === "page" ? "Claude put a page on the tab: " + (n.title || n.name) : n.kind === "image" ? "Claude sent a picture: " + n.name : n.text;
+  $("noteopen").hidden = n.kind !== "page" && n.kind !== "image";
+  $("noteopen").textContent = n.kind === "image" ? "Add to canvas" : "Open";
+  $("noteopen").onclick = () => n.kind === "image" ? addImage(n) : openInboxPage(n);
   $("noteclose").onclick = () => markSeen(n.id);
   applyNotePos();
 }
@@ -415,6 +416,16 @@ $("note").addEventListener("pointermove", e => {
 const endNoteDrag = e => { if (!noteDrag || e.pointerId !== noteDrag.id) return; noteDrag = null; try { localStorage.setItem(NOTE_POS_KEY, JSON.stringify(notePos)); } catch (_) { /* ignore */ } };
 $("note").addEventListener("pointerup", endNoteDrag); $("note").addEventListener("pointercancel", endNoteDrag);
 function markSeen(id) { seenId = Math.max(seenId, id); queue = queue.filter(o => o.id > seenId); renderInbox(); }
+function addImage(n) { // put the picture on the canvas (blank paper or the open page's ink), fitted to the view; an undoable step you can move / resize / fill
+  const im = getImg(n.name), place = () => {
+    const W = wrap.clientWidth / view.s, H = wrap.clientHeight / view.s, k = Math.min(0.8 * W / im.naturalWidth, 0.8 * H / im.naturalHeight, 1);
+    const w = im.naturalWidth * k, h = im.naturalHeight * k, x = (-view.x) / view.s + (W - w) / 2, y = (-view.y) / view.s + (H - h) / 2;
+    commit([...objects, { id: nextId++, type: "image", kind: "rect", color: "#000000", size: 0, src: n.name, a: { x, y }, b: { x: x + w, y: y + h } }]);
+    toast("Picture added: tap Select to move it, or Fill inside its lines");
+  };
+  if (im.complete && im.naturalWidth) place(); else { im.addEventListener("load", place, { once: true }); im.addEventListener("error", () => toast("Could not load the picture", "bad"), { once: true }); }
+  markSeen(n.id);
+}
 function adoptBlank(name) { // blank paper turned into a page: its ink moves into the page (the page itself carries the paper it had)
   if (activePage === name) return;
   const blank = activePage === "" ? objects : (store[""] ? store[""].objects : []);
@@ -564,7 +575,18 @@ function floodFill(c, o) {
   }
   c.putImageData(img, 0, 0);
 }
+const imgs = new Map(); // pictures on the canvas (type "image", a rect a-b): drawn into the ink layer, so the Fill tool sees their pixels
+function getImg(src) {
+  let im = imgs.get(src);
+  if (!im) { im = new Image(); im.onload = () => { rebase(); present(); }; im.src = `/img/${encodeURIComponent(src)}?t=${encodeURIComponent(token)}`; imgs.set(src, im); }
+  return im;
+}
 function drawObj(c, o) {
+  if (o.type === "image") {
+    const im = getImg(o.src);
+    if (im.complete && im.naturalWidth) c.drawImage(im, Math.min(o.a.x, o.b.x), Math.min(o.a.y, o.b.y), Math.abs(o.b.x - o.a.x), Math.abs(o.b.y - o.a.y));
+    return;
+  }
   if (o.type === "fill") return floodFill(c, o);
   c.strokeStyle = o.color; c.lineCap = c.lineJoin = "round";
   if (o.type === "stroke") {
@@ -953,6 +975,7 @@ $("send").onclick = async () => {
   setSend("busy");
   await new Promise(res => requestAnimationFrame(() => setTimeout(res, 0))); // let the spinner paint before the heavy export
   // The sent image covers the original canvas AND any ink outside it (zoom/pan lets you write past its edge), never the zoom itself.
+  await Promise.all(objects.filter(o => o.type === "image").map(o => { const im = getImg(o.src); return im.complete ? 0 : new Promise(res => { im.addEventListener("load", res); im.addEventListener("error", res); }); }));
   const r = wrap.getBoundingClientRect(), ink = bboxOf(objects.filter(o => o.type !== "fill"));
   let x0 = 0, y0 = 0, x1 = r.width, y1 = r.height;
   if (ink) { x0 = Math.min(0, ink.x0 - EXPORT_PAD); y0 = Math.min(0, ink.y0 - EXPORT_PAD); x1 = Math.max(r.width, ink.x1 + EXPORT_PAD); y1 = Math.max(r.height, ink.y1 + EXPORT_PAD); }
