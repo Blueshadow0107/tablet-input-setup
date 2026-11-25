@@ -73,7 +73,6 @@ const MAX_EXPORT = 2000;       // longest side of the sent PNG
 const HOLD_MS = 550;           // hold the pen still this long to snap a stroke to a line
 const STRAIGHT_MAX_DEV = 0.12; // snap only if the stroke is this close to straight (fraction of its length)
 const PEN_MIN_P = 0.03;        // below this pen pressure the tip is NOT touching: the S Pen side button shows up as buttons=1 with ~0 pressure
-const LIGHT_TOUCH_MS = 150;    // a pointerdown with ~0 pressure that gains pressure this fast is a gentle touch, not "button then touch"
 const HANDLE_R = 24;           // touch radius of the resize handles
 const UNDO_LIMIT = 200;
 const TAP_MS = 350, TAP_SLOP = 20; // multi-finger tap gestures
@@ -86,7 +85,7 @@ const base = document.createElement("canvas"), bctx = base.getContext("2d"); // 
 const $ = id => document.getElementById(id);
 let objects = [], undoStack = [], redoStack = [], sel = new Set(), hidden = new Set();
 let tool = "pen", shapeKind = "line", color = COLORS[0], fingerOK = false, cur = null, holdT = 0, nextId = 1;
-let airBtn = false, airDownT = 0; // S Pen side button held with the tip off the screen; airDownT = when it began, if it arrived as a pointerdown
+let airBtn = false; // S Pen side button held: seen as buttons=1 with ~0 pressure (a hover move, or a pointerdown with ~0 pressure when the tip lands with the button already down)
 const dpr = () => window.devicePixelRatio || 1;
 
 // ---- toolbar ----
@@ -259,14 +258,13 @@ const inContact = e => e.pointerType !== "pen" || penTouching(e);
 const isPenErase = e => e.pointerType === "pen" && (airBtn || !!(e.buttons & 32) || !!(e.buttons & 2) || e.button === 5); // side button, or an eraser end / barrel button where reported
 const pt = e => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pointerType === "pen" ? (e.pressure || 0.5) : 0.5 }; };
 
-function startStroke(e) {
-  if (airBtn && airDownT && performance.now() - airDownT < LIGHT_TOUCH_MS) { airBtn = false; airDownT = 0; } // gentle touch, not button-then-touch
+function startStroke(e, viaDown = false) { // viaDown: began on a real pointerdown, so it ends on pointerup, not on a pressure drop
   const p = pt(e), t = isPenErase(e) ? "eraser" : tool, size = +$("size").value;
   try { cv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events have no capturable pointer */ }
-  const b = { pid: e.pointerId, ptype: e.pointerType, color, size, viaBtn: e.pointerType === "pen" && airBtn }; // viaBtn: ends when the tip lifts or the button is released
+  const b = { pid: e.pointerId, ptype: e.pointerType, color, size, viaBtn: e.pointerType === "pen" && airBtn, viaDown }; // viaBtn: erasing because the side button is held
   if (t === "pen") { cur = { ...b, mode: "pen", pts: [p] }; armHold(); }
   else if (t === "shapes") cur = { ...b, mode: "shape", kind: shapeKind, a: p, b: p };
-  else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(10, size * 2.5) }; eraseAt(p); }
+  else if (t === "eraser") { cur = { ...b, mode: "erase", pts: [p], hit: new Set(), r: Math.max(14, size * 3) }; eraseAt(p); }
   else selectDown(p, b);
   present();
 }
@@ -285,7 +283,7 @@ function selectDown(p, b) {
 }
 function eraseAt(p) {
   let changed = false;
-  for (const o of objects) if (!hidden.has(o.id) && hitObj(o, p, cur.r)) { cur.hit.add(o.id); hidden.add(o.id); changed = true; }
+  for (const o of objects) if (!hidden.has(o.id) && o.id !== cur.protect && hitObj(o, p, cur.r)) { cur.hit.add(o.id); hidden.add(o.id); changed = true; }
   if (changed) rebase();
 }
 function eraseSweep(a, b) { // test the whole path, not just where the pen landed, so a fast flick can't skip over a line
@@ -303,9 +301,9 @@ function trySnap() {
 }
 function cancelCur() { clearTimeout(holdT); cur = null; hidden.clear(); rebase(); present(); }
 
-function trackPenButton(e, fromDown) { // maintain airBtn: side button held, tip off the screen
-  if (!e.buttons) { airBtn = false; airDownT = 0; }
-  else if (!cur && !penTouching(e)) { if (!airBtn) airDownT = fromDown ? performance.now() : 0; airBtn = true; }
+function trackPenButton(e) { // maintain airBtn: side button held, tip not (yet) pressing
+  if (!e.buttons) airBtn = false;
+  else if (!cur && !penTouching(e)) airBtn = true;
 }
 function onMove(e) {
   if (e.pointerType === "touch") gMove(e);
@@ -316,7 +314,7 @@ function onMove(e) {
     return;
   }
   if (e.pointerId !== cur.pid) return;
-  if (cur.viaBtn && !penTouching(e)) { onUp(e); airBtn = !!e.buttons; return; } // tip lifted (button may still be held) or button released
+  if (cur.viaBtn && e.pointerType === "pen" && (!e.buttons || (!cur.viaDown && !penTouching(e)))) { onUp(e); airBtn = !!e.buttons; return; } // tip lifted / button released (a stroke that began on a pointerdown just waits for pointerup, since pressure is unreliable while the button is held)
   const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   for (const ev of (evs.length ? evs : [e])) step(pt(ev));
 }
@@ -368,20 +366,43 @@ function onUp(e) {
   }
 }
 cv.addEventListener("pointerdown", e => {
-  if (e.pointerType === "pen") trackPenButton(e, true);
+  if (e.pointerType === "pen") trackPenButton(e);
   dbg(e, "down");
   if (e.pointerType === "touch") {
     gDown(e);
-    if (touches.size >= 2 && cur && cur.ptype === "touch") cancelCur(); // second finger: it's a gesture, not a stroke
+    if (touches.size >= 2 && cur && cur.ptype === "touch" && !cur.viaBtn) cancelCur(); // second finger: it's a gesture, not a stroke
     if (!fingerOK || touches.size >= 2) return;
   }
-  if (cur || !inContact(e)) return; // button pressed in the air: wait for the tip to touch
+  if (cur) return;
+  // With the side button held the pen reports almost no pressure (0.0002 rising to ~0.04), but a pen pointerdown with buttons=1 is still the tip landing:
+  // normal touches begin at 0.08+, so a pointerdown below PEN_MIN_P means "button + tip" -> erase now, no pressure needed.
+  if (e.pointerType === "pen" && !penTouching(e)) { if (e.buttons & 1) { airBtn = true; startStroke(e, true); } return; }
+  if (!inContact(e)) return;
   startStroke(e);
 });
 cv.addEventListener("pointermove", onMove);
 cv.addEventListener("pointerup", onUp);
-cv.addEventListener("pointercancel", e => { dbg(e, "cancel"); if (e.pointerType === "pen") airBtn = false; if (cur && e.pointerId === cur.pid) cancelCur(); if (e.pointerType === "touch") touches.delete(e.pointerId); });
-cv.addEventListener("contextmenu", e => { e.preventDefault(); dbg(e, "ctxmenu"); });
+cv.addEventListener("pointercancel", e => {
+  dbg(e, "cancel"); if (e.pointerType === "pen") airBtn = false;
+  if (cur && e.pointerId === cur.pid) { if (cur.viaBtn) onUp(e); else cancelCur(); } // Android often cancels the button-tip touch: keep what was erased
+  if (e.pointerType === "touch") touches.delete(e.pointerId);
+});
+cv.addEventListener("contextmenu", e => {
+  e.preventDefault(); dbg(e, "ctxmenu");
+  // Pressing the side button in the middle of a pen stroke reaches Chrome only as a contextmenu event: keep the ink so far, erase from here
+  if (e.pointerType === "pen" && cur && cur.mode === "pen" && !cur.viaBtn) switchPenToErase();
+});
+function switchPenToErase() {
+  const c = cur, last = c.pts[c.pts.length - 1];
+  clearTimeout(holdT); cur = null;
+  const id = nextId++;
+  commit(c.snapped ? [...objects, { id, type: "shape", kind: "line", color: c.color, size: c.size, a: c.pts[0], b: c.pts[1] }]
+                   : [...objects, { id, type: "stroke", color: c.color, size: c.size, pts: c.pts }]);
+  airBtn = true;
+  // protect: the eraser starts exactly where that ink ends, so don't let it delete what was just written
+  cur = { pid: c.pid, ptype: "pen", color: c.color, size: c.size, viaBtn: true, viaDown: true, mode: "erase", pts: [last], hit: new Set(), r: Math.max(14, c.size * 3), protect: id };
+  eraseAt(last); present();
+}
 
 // ---- multi-finger tap gestures: 2 fingers = undo, 3 = redo ----
 const touches = new Map(); let gMax = 0, gStart = 0, gMoved = false;
