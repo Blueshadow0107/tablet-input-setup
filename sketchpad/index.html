@@ -707,7 +707,8 @@ cv.addEventListener("pointercancel", e => {
 cv.addEventListener("contextmenu", e => {
   e.preventDefault(); dbg(e, "ctxmenu");
   // Pressing the side button in the middle of a pen stroke reaches Chrome only as a contextmenu event: keep the ink so far, switch to the Eraser, erase from here
-  if (e.pointerType === "pen" && cur && cur.mode === "pen") { ignoreHeld = true; switchPenToErase(); }
+  // In the wrapper app the button is read natively (and a pen resting still also produces this event, as a long-press), so it must NOT switch tools there.
+  if (!nativePen && e.pointerType === "pen" && cur && cur.mode === "pen") { ignoreHeld = true; switchPenToErase(); }
 });
 function switchPenToErase() {
   const c = cur, last = c.pts[c.pts.length - 1];
