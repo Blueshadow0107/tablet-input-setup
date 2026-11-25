@@ -845,7 +845,7 @@ $("send").onclick = async () => {
   const r = wrap.getBoundingClientRect(), ink = bboxOf(objects.filter(o => o.type !== "fill"));
   let x0 = 0, y0 = 0, x1 = r.width, y1 = r.height;
   if (ink) { x0 = Math.min(0, ink.x0 - EXPORT_PAD); y0 = Math.min(0, ink.y0 - EXPORT_PAD); x1 = Math.max(r.width, ink.x1 + EXPORT_PAD); y1 = Math.max(r.height, ink.y1 + EXPORT_PAD); }
-  const W = x1 - x0, H = y1 - y0, k = Math.min(1, MAX_EXPORT / Math.max(W, H));
+  const W = x1 - x0, H = y1 - y0, k = Math.min(dpr(), MAX_EXPORT / Math.max(W, H)); // the screen's real resolution (not half of it), capped at MAX_EXPORT on the long side
   const out = document.createElement("canvas"); out.width = Math.round(W * k); out.height = Math.round(H * k);
   const oc = out.getContext("2d"); if (!activePage) { oc.fillStyle = PAPER; oc.fillRect(0, 0, out.width, out.height); } // over a page the PNG is transparent ink only
   oc.scale(k, k); oc.translate(-x0, -y0); for (const o of objects) drawObj(oc, o);

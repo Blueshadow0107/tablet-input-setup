@@ -166,7 +166,7 @@ case "$cmd" in
     [[ -x "$CHROME" ]] || CHROME="$(command -v chromium google-chrome chrome 2>/dev/null | head -n1 || true)"
     [[ -x "$CHROME" ]] || { echo "no headless Chrome/Chromium found (set CHROME=...)" >&2; exit 1; }
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor=1 --screenshot="$tmp/page.png" \
+    "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --force-device-scale-factor="$scl" --screenshot="$tmp/page.png" \
       --window-size="${vp/x/,}" "file://$DIR/pages/$page/index.html" >/dev/null 2>&1
     [[ -s "$tmp/page.png" ]] || { echo "could not render the page" >&2; exit 1; }
     ink_dim="$(magick identify -format '%wx%h' "$DIR/$cj.png")"
