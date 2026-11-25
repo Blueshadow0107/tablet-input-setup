@@ -283,7 +283,7 @@ $("undo").onclick = () => undo(); $("redo").onclick = () => redo();
 $("clear").onclick = () => { if (objects.length) { commit([]); toast("Cleared (Undo brings it back)"); } };
 $("del").onclick = deleteSel;
 // ---- screen orientation (wrapper app only): a tablet held flat or at a slant can't tell how you hold it, so this locks the view ----
-const APP = /SketchpadApp/.test(navigator.userAgent), ORIENT_KEY = "sketchpad.orient", ORIENTS = ["auto", "portrait", "landscape"];
+const APP = /SketchpadApp/.test(navigator.userAgent), ORIENT_KEY = "sketchpad.orient", ORIENTS = ["auto", "landscape", "portrait"];
 let orient = "auto";
 try { orient = localStorage.getItem(ORIENT_KEY) || "auto"; } catch (_) { /* ignore */ }
 function applyOrient() {
